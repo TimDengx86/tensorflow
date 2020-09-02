@@ -16,66 +16,45 @@ limitations under the License.
 #include "tensorflow/lite/delegates/gpu/common/model_builder.h"
 
 #include <algorithm>
+#include <any>
 #include <cstdint>
-#include <cstring>
-#include <limits>
+#include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
-#include <unordered_map>
 #include <utility>
+#include <variant>
 #include <vector>
 
+#include "absl/base/attributes.h"
+#include "absl/container/flat_hash_map.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "absl/strings/string_view.h"
-#include "tensorflow/lite/builtin_op_data.h"
 #include "tensorflow/lite/builtin_ops.h"
 #include "tensorflow/lite/c/builtin_op_data.h"
 #include "tensorflow/lite/c/common.h"
-#include "tensorflow/lite/context.h"
-#include "tensorflow/lite/context_util.h"
 #include "tensorflow/lite/delegates/gpu/common/custom_parsers.h"
 #include "tensorflow/lite/delegates/gpu/common/data_type.h"
 #include "tensorflow/lite/delegates/gpu/common/model.h"
 #include "tensorflow/lite/delegates/gpu/common/model_builder_helper.h"
+#include "tensorflow/lite/delegates/gpu/common/model_transformer.h"
 #include "tensorflow/lite/delegates/gpu/common/object_reader.h"
 #include "tensorflow/lite/delegates/gpu/common/operations.h"
 #include "tensorflow/lite/delegates/gpu/common/shape.h"
 #include "tensorflow/lite/delegates/gpu/common/status.h"
 #include "tensorflow/lite/delegates/gpu/common/tensor.h"
-#include "tensorflow/lite/delegates/gpu/common/transformations/general_transformations.h"
+#include "tensorflow/lite/delegates/gpu/common/transformations/model_transformations.h"
 #include "tensorflow/lite/delegates/utils.h"
 #include "tensorflow/lite/kernels/internal/reference/dequantize.h"
 #include "tensorflow/lite/kernels/internal/tensor_ctypes.h"
 #include "tensorflow/lite/kernels/kernel_util.h"
-#include "tensorflow/lite/schema/schema_generated.h"
 #include "tensorflow/lite/util.h"
 
 namespace tflite {
 namespace gpu {
 namespace {
-
-// Creates a node that consumes output from the given node. Because output need
-// to stay the same, newly created node will inherit the output from the given
-// node, which will in turn get newly created copy of output. This is necessary
-// to preserve reference consistency if another node was pointing at that
-// output:
-//   node(output)
-// will turn into:
-//   node(copy(output)) <- passthrough_node(output)
-absl::Status NewPassthroughNode(GraphFloat32* graph, Node* node,
-                                const Value* output, Node** passthru_node) {
-  *passthru_node = graph->NewNode();
-  // Make copies for every output in the original node.
-  RETURN_IF_ERROR(graph->SetProducer((*passthru_node)->id, output->id));
-  Value* copy_output = graph->NewValue();
-  RETURN_IF_ERROR(graph->SetProducer(node->id, copy_output->id));
-  RETURN_IF_ERROR(graph->AddConsumer((*passthru_node)->id, copy_output->id));
-  copy_output->tensor = output->tensor;
-  copy_output->tensor.ref = -1;
-  return absl::OkStatus();
-}
 
 absl::Status CheckTensorIsAvailable(const TfLiteContext* context,
                                     const TfLiteNode* tflite_node, int idx) {
@@ -104,71 +83,6 @@ class TFLiteOperationParser {
                                    const TfLiteNode* tflite_node,
                                    const TfLiteRegistration* registration) = 0;
 };
-
-absl::Status IsActivationSupported(TfLiteFusedActivation fused_activation) {
-  switch (fused_activation) {
-    case kTfLiteActNone:
-    case kTfLiteActRelu:
-    case kTfLiteActReluN1To1:
-    case kTfLiteActRelu6:
-    case kTfLiteActTanh:
-    case kTfLiteActSigmoid:
-      return absl::OkStatus();
-    case kTfLiteActSignBit:
-      return absl::UnimplementedError(
-          "TfLiteFusedActivation.kTfLiteActSignBit");
-
-      // Do not add default; we want compilation error rather than run-time
-      // error.
-  }
-}
-
-// If there is fused activation present, then there will be another node created
-// that will have identical output as the given node. New operation node will
-// depend on the given node output.
-absl::Status MaybeFuseActivation(TfLiteFusedActivation fused_activation,
-                                 GraphFloat32* graph, Node* node) {
-  const auto outputs = graph->FindOutputs(node->id);
-  if (outputs.size() != 1) {
-    return absl::InternalError("Number of outputs != 1");
-  }
-  switch (fused_activation) {
-    case kTfLiteActNone:
-      // Nothing to do here
-      return absl::OkStatus();
-    case kTfLiteActRelu:
-    case kTfLiteActReluN1To1:
-    case kTfLiteActRelu6: {
-      ReLUAttributes attr;
-      attr.clip = fused_activation == kTfLiteActRelu
-                      ? 0.0f
-                      : (fused_activation == kTfLiteActReluN1To1 ? 1.0f : 6.0f);
-      Node* activation_node;
-      RETURN_IF_ERROR(
-          NewPassthroughNode(graph, node, outputs[0], &activation_node));
-      activation_node->operation.type = ToString(OperationType::RELU);
-      activation_node->operation.attributes = attr;
-      return absl::OkStatus();
-    }
-    case kTfLiteActTanh: {
-      Node* activation_node;
-      RETURN_IF_ERROR(
-          NewPassthroughNode(graph, node, outputs[0], &activation_node));
-      activation_node->operation.type = ToString(OperationType::TANH);
-      return absl::OkStatus();
-    }
-    case kTfLiteActSigmoid: {
-      Node* activation_node;
-      RETURN_IF_ERROR(
-          NewPassthroughNode(graph, node, outputs[0], &activation_node));
-      activation_node->operation.type = ToString(OperationType::SIGMOID);
-      return absl::OkStatus();
-    } break;
-    default:
-      return absl::NotFoundError(
-          absl::StrCat("Unsupported fused activation: ", fused_activation));
-  }
-}
 
 HW ToHW(int32_t h, int32_t w) { return HW(h > 0 ? h : 1, w > 0 ? w : 1); }
 
@@ -884,6 +798,7 @@ class ElementwiseOperationParser : public TFLiteOperationParser {
       case OperationType::ABS:
       case OperationType::COPY:
       case OperationType::COS:
+      case OperationType::ELU:
       case OperationType::EXP:
       case OperationType::LOG:
       case OperationType::RSQRT:
@@ -901,6 +816,8 @@ class ElementwiseOperationParser : public TFLiteOperationParser {
   bool IsTwoArgumentOperation() const {
     switch (operation_type_) {
       case OperationType::DIV:
+      case OperationType::MAXIMUM:
+      case OperationType::MINIMUM:
       case OperationType::POW:
       case OperationType::SQUARED_DIFF:
       case OperationType::SUB:
@@ -912,8 +829,11 @@ class ElementwiseOperationParser : public TFLiteOperationParser {
 
   bool IsTwoArgumentOperationWithConst() const {
     switch (operation_type_) {
-      case OperationType::MINIMUM:
+      case OperationType::DIV:
       case OperationType::MAXIMUM:
+      case OperationType::MINIMUM:
+      case OperationType::POW:
+      case OperationType::SQUARED_DIFF:
       case OperationType::SUB:
         return true;
       default:
@@ -1186,7 +1106,6 @@ class MulOperationParser : public TFLiteOperationParser {
   absl::Status Parse(const TfLiteNode* tflite_node,
                      const TfLiteRegistration* registration,
                      GraphFloat32* graph, ObjectReader* reader) final {
-    // Determine runtime/constant tensors.
     const TfLiteTensor* input0 = reader->GetInputTensor(0);
     if (!input0) {
       return absl::InvalidArgumentError(
@@ -1207,10 +1126,22 @@ class MulOperationParser : public TFLiteOperationParser {
 
     Node* node = graph->NewNode();
     node->operation.type = ToString(OperationType::MUL);
+    RETURN_IF_ERROR(reader->AddOutputs(node));
 
-    // The "larger" input tensor must be bound to 1st input and the "smaller"
-    // input tensor ("mask") must be bound to 2nd input.
+    // Determine runtime/constant tensors.
     if (runtime_tensor0 && runtime_tensor1) {
+      if (input0 == input1) {
+        // replace MUL(A, A) with POW(A, 2.0)
+        // TODO(b/166831113): Support the same inputs for operations.
+        node->operation.type = ToString(OperationType::POW);
+        ElementwiseAttributes attr;
+        attr.param = 2.0f;
+        node->operation.attributes = std::move(attr);
+        return reader->AddInput(node, 0);
+      }
+
+      // The "larger" input tensor must be bound to 1st input and the "smaller"
+      // input tensor must be bound to 2nd input.
       BHWC shape0;
       RETURN_IF_ERROR(ExtractTensorShape(*input0, &shape0));
       BHWC shape1;
@@ -1222,53 +1153,17 @@ class MulOperationParser : public TFLiteOperationParser {
         input_tensor0 = 1;
         input_tensor1 = 0;
       }
-      RETURN_IF_ERROR(
-          ParseApplyMask(node, input_tensor0, input_tensor1, graph, reader));
+      RETURN_IF_ERROR(reader->AddInput(node, input_tensor0));
+      RETURN_IF_ERROR(reader->AddInput(node, input_tensor1));
     } else {
-      // The runtime input tensor must be bound to 1st input and the constant
-      // input tensor must be bound to 2nd input.
-      int runtime_tensor = 0;
-      int constant_tensor = 1;
-      TfLiteIntArray* constant_dims = input1->dims;
-      if (constant_tensor0 && runtime_tensor1) {
-        runtime_tensor = 1;
-        constant_tensor = 0;
-        constant_dims = input0->dims;
-      }
-      RETURN_IF_ERROR(ParseMultiplyScalar(node, runtime_tensor, constant_tensor,
-                                          constant_dims, graph, reader));
+      ElementwiseAttributes attr;
+      RETURN_IF_ERROR(ParseInputsWithConstTensor(node, reader, &attr.param));
+      node->operation.attributes = std::move(attr);
     }
 
     const TfLiteMulParams* tf_options;
     RETURN_IF_ERROR(RetrieveBuiltinData(tflite_node, &tf_options));
     return MaybeFuseActivation(tf_options->activation, graph, node);
-  }
-
- private:
-  absl::Status ParseApplyMask(Node* node, int input_tensor0, int input_tensor1,
-                              GraphFloat32* graph, ObjectReader* reader) {
-    RETURN_IF_ERROR(reader->AddInput(node, input_tensor0));
-    RETURN_IF_ERROR(reader->AddInput(node, input_tensor1));
-    return reader->AddOutputs(node);
-  }
-
-  absl::Status ParseMultiplyScalar(Node* node, int runtime_tensor,
-                                   int constant_tensor,
-                                   const TfLiteIntArray* constant_dims,
-                                   GraphFloat32* graph, ObjectReader* reader) {
-    RETURN_IF_ERROR(reader->AddInput(node, runtime_tensor));
-    ElementwiseAttributes attr;
-    if (constant_dims->size <= 0 || NumElements(constant_dims) == 1) {
-      Tensor<Scalar, DataType::FLOAT32> tensor;
-      RETURN_IF_ERROR(reader->ReadTensor(constant_tensor, &tensor));
-      attr.param = tensor.data[0];
-    } else {
-      Tensor<Linear, DataType::FLOAT32> tensor;
-      RETURN_IF_ERROR(reader->ReadTensor(constant_tensor, &tensor));
-      attr.param = std::move(tensor);
-    }
-    node->operation.attributes = std::move(attr);
-    return reader->AddOutputs(node);
   }
 };
 
@@ -2264,6 +2159,7 @@ class RoIToTransformMatrixOperationParser : public TFLiteOperationParser {
   absl::Status IsSupported(const TfLiteContext* context,
                            const TfLiteNode* tflite_node,
                            const TfLiteRegistration* registration) final {
+    RETURN_IF_ERROR(CheckMaxSupportedOpVersion(registration, 2));
     RETURN_IF_ERROR(CheckInputsOutputs(context, tflite_node,
                                        /*runtime_inputs=*/1, /*outputs=*/1));
     return absl::OkStatus();
@@ -2279,50 +2175,15 @@ class RoIToTransformMatrixOperationParser : public TFLiteOperationParser {
     std::string op_name = "roi_to_transform_matrix";
     node->operation.type = op_name;
     BHWC output_shape;
-    RETURN_IF_ERROR(
-        ParseCustomAttributes(op_name, tflite_node->custom_initial_data,
-                              tflite_node->custom_initial_data_size,
-                              &(node->operation.attributes), &output_shape));
+    RETURN_IF_ERROR(ParseCustomAttributes(
+        op_name, registration->version, tflite_node->custom_initial_data,
+        tflite_node->custom_initial_data_size, &(node->operation.attributes),
+        &output_shape));
 
     auto output_value = graph->FindOutputs(node->id)[0];
     output_value->tensor.shape = output_shape;
     return absl::OkStatus();
   }
-
- private:
-};
-
-class RoIToTransformMatrixV2OperationParser : public TFLiteOperationParser {
- public:
-  absl::Status IsSupported(const TfLiteContext* context,
-                           const TfLiteNode* tflite_node,
-                           const TfLiteRegistration* registration) final {
-    RETURN_IF_ERROR(CheckInputsOutputs(context, tflite_node,
-                                       /*runtime_inputs=*/1, /*outputs=*/1));
-    return absl::OkStatus();
-  }
-
-  absl::Status Parse(const TfLiteNode* tflite_node,
-                     const TfLiteRegistration* registration,
-                     GraphFloat32* graph, ObjectReader* reader) final {
-    Node* node = graph->NewNode();
-    RETURN_IF_ERROR(reader->AddInput(node, 0));  // bbox
-    RETURN_IF_ERROR(reader->AddOutputs(node));
-
-    std::string op_name = "roi_to_transform_matrix_v2";
-    node->operation.type = op_name;
-    BHWC output_shape;
-    RETURN_IF_ERROR(
-        ParseCustomAttributes(op_name, tflite_node->custom_initial_data,
-                              tflite_node->custom_initial_data_size,
-                              &(node->operation.attributes), &output_shape));
-
-    auto output_value = graph->FindOutputs(node->id)[0];
-    output_value->tensor.shape = output_shape;
-    return absl::OkStatus();
-  }
-
- private:
 };
 
 class TransformTensorOperationParser : public TFLiteOperationParser {
@@ -2346,10 +2207,10 @@ class TransformTensorOperationParser : public TFLiteOperationParser {
     std::string op_name = "transform_tensor";
     node->operation.type = op_name;
     BHWC output_shape;
-    RETURN_IF_ERROR(
-        ParseCustomAttributes(op_name, tflite_node->custom_initial_data,
-                              tflite_node->custom_initial_data_size,
-                              &(node->operation.attributes), &output_shape));
+    RETURN_IF_ERROR(ParseCustomAttributes(
+        op_name, registration->version, tflite_node->custom_initial_data,
+        tflite_node->custom_initial_data_size, &(node->operation.attributes),
+        &output_shape));
 
     auto output_value = graph->FindOutputs(node->id)[0];
 
@@ -2383,10 +2244,10 @@ class TransformTensorBilinearV2OperationParser : public TFLiteOperationParser {
     std::string op_name = "transform_tensor_bilinear_v2";
     node->operation.type = op_name;
     BHWC output_shape;
-    RETURN_IF_ERROR(
-        ParseCustomAttributes(op_name, tflite_node->custom_initial_data,
-                              tflite_node->custom_initial_data_size,
-                              &(node->operation.attributes), &output_shape));
+    RETURN_IF_ERROR(ParseCustomAttributes(
+        op_name, registration->version, tflite_node->custom_initial_data,
+        tflite_node->custom_initial_data_size, &(node->operation.attributes),
+        &output_shape));
 
     auto output_value = graph->FindOutputs(node->id)[0];
 
@@ -2418,11 +2279,11 @@ class TransformLandmarksOperationParser : public TFLiteOperationParser {
     RETURN_IF_ERROR(reader->AddOutputs(node));
     std::string op_name = "transform_landmarks";
     node->operation.type = op_name;
-    BHWC output_shape;
-    RETURN_IF_ERROR(
-        ParseCustomAttributes(op_name, tflite_node->custom_initial_data,
-                              tflite_node->custom_initial_data_size,
-                              &(node->operation.attributes), &output_shape));
+    BHWC output_shape = graph->FindOutputs(node->id)[0]->tensor.shape;
+    RETURN_IF_ERROR(ParseCustomAttributes(
+        op_name, registration->version, tflite_node->custom_initial_data,
+        tflite_node->custom_initial_data_size, &(node->operation.attributes),
+        &output_shape));
 
     auto output_value = graph->FindOutputs(node->id)[0];
 
@@ -2456,10 +2317,10 @@ class TransformLandmarksV2OperationParser : public TFLiteOperationParser {
     auto output_value = graph->FindOutputs(node->id)[0];
     output_value->tensor.shape = graph->FindInputs(node->id)[0]->tensor.shape;
     BHWC output_shape = output_value->tensor.shape;
-    RETURN_IF_ERROR(
-        ParseCustomAttributes(op_name, tflite_node->custom_initial_data,
-                              tflite_node->custom_initial_data_size,
-                              &(node->operation.attributes), &output_shape));
+    RETURN_IF_ERROR(ParseCustomAttributes(
+        op_name, registration->version, tflite_node->custom_initial_data,
+        tflite_node->custom_initial_data_size, &(node->operation.attributes),
+        &output_shape));
 
     return absl::OkStatus();
   }
@@ -2472,6 +2333,7 @@ class Landmarks2TransformMatrixOperationParser : public TFLiteOperationParser {
   absl::Status IsSupported(const TfLiteContext* context,
                            const TfLiteNode* tflite_node,
                            const TfLiteRegistration* registration) final {
+    RETURN_IF_ERROR(CheckMaxSupportedOpVersion(registration, 2));
     return CheckInputsOutputs(context, tflite_node, /*runtime_inputs=*/1,
                               /*outputs=*/1);
   }
@@ -2486,41 +2348,10 @@ class Landmarks2TransformMatrixOperationParser : public TFLiteOperationParser {
     const std::string op_name = "landmarks_to_transform_matrix";
     node->operation.type = op_name;
     BHWC output_shape;
-    RETURN_IF_ERROR(
-        ParseCustomAttributes(op_name, tflite_node->custom_initial_data,
-                              tflite_node->custom_initial_data_size,
-                              &(node->operation.attributes), &output_shape));
-
-    auto output_value = graph->FindOutputs(node->id)[0];
-    output_value->tensor.shape = output_shape;
-    return absl::OkStatus();
-  }
-};
-
-class Landmarks2TransformMatrixV2OperationParser
-    : public TFLiteOperationParser {
- public:
-  absl::Status IsSupported(const TfLiteContext* context,
-                           const TfLiteNode* tflite_node,
-                           const TfLiteRegistration* registration) final {
-    return CheckInputsOutputs(context, tflite_node, /*runtime_inputs=*/1,
-                              /*outputs=*/1);
-  }
-
-  absl::Status Parse(const TfLiteNode* tflite_node,
-                     const TfLiteRegistration* registration,
-                     GraphFloat32* graph, ObjectReader* reader) final {
-    Node* node = graph->NewNode();
-    RETURN_IF_ERROR(reader->AddInput(node, 0));  // landmarks
-    RETURN_IF_ERROR(reader->AddOutputs(node));   // transform matrix
-
-    const std::string op_name = "landmarks_to_transform_matrix_v2";
-    node->operation.type = op_name;
-    BHWC output_shape;
-    RETURN_IF_ERROR(
-        ParseCustomAttributes(op_name, tflite_node->custom_initial_data,
-                              tflite_node->custom_initial_data_size,
-                              &(node->operation.attributes), &output_shape));
+    RETURN_IF_ERROR(ParseCustomAttributes(
+        op_name, registration->version, tflite_node->custom_initial_data,
+        tflite_node->custom_initial_data_size, &(node->operation.attributes),
+        &output_shape));
 
     auto output_value = graph->FindOutputs(node->id)[0];
     output_value->tensor.shape = output_shape;
@@ -2548,10 +2379,10 @@ class AlignmentPointsToTransformMatrixOperationParser
     const std::string op_name = "alignment_points_to_transform_matrix";
     node->operation.type = op_name;
     BHWC output_shape;
-    RETURN_IF_ERROR(
-        ParseCustomAttributes(op_name, tflite_node->custom_initial_data,
-                              tflite_node->custom_initial_data_size,
-                              &(node->operation.attributes), &output_shape));
+    RETURN_IF_ERROR(ParseCustomAttributes(
+        op_name, registration->version, tflite_node->custom_initial_data,
+        tflite_node->custom_initial_data_size, &(node->operation.attributes),
+        &output_shape));
 
     auto output_value = graph->FindOutputs(node->id)[0];
     output_value->tensor.shape = output_shape;
@@ -2756,9 +2587,6 @@ std::unique_ptr<TFLiteOperationParser> NewOperationParser(
       if (custom_name == "RoIToTransformMatrix") {
         return std::make_unique<RoIToTransformMatrixOperationParser>();
       }
-      if (custom_name == "RoIToTransformMatrixV2") {
-        return std::make_unique<RoIToTransformMatrixV2OperationParser>();
-      }
       if (custom_name == "TransformTensor") {
         return std::make_unique<TransformTensorOperationParser>();
       }
@@ -2771,11 +2599,9 @@ std::unique_ptr<TFLiteOperationParser> NewOperationParser(
       if (custom_name == "TransformLandmarksV2") {
         return std::make_unique<TransformLandmarksV2OperationParser>();
       }
-      if (custom_name == "Landmarks2TransformMatrix") {
+      if (custom_name == "Landmarks2TransformMatrix" ||
+          custom_name == "Landmarks2TransformMatrixV2") {
         return std::make_unique<Landmarks2TransformMatrixOperationParser>();
-      }
-      if (custom_name == "Landmarks2TransformMatrixV2") {
-        return std::make_unique<Landmarks2TransformMatrixV2OperationParser>();
       }
       if (custom_name == "AlignmentPointsToTransformMatrix") {
         return std::make_unique<
@@ -2884,8 +2710,8 @@ TfLiteIntArray* GetOpsToReplace(TfLiteContext* context, bool allow_quant_ops,
 // guarantee that the order will match the source model tensors order.
 absl::Status PrecreateIOTensors(
     TfLiteContext* context, GraphFloat32* graph, TfLiteIntArray* io_tensors,
-    std::unordered_map<int, int>* quant_conversion_map,
-    std::unordered_map<int, Value*>* tensor_to_value) {
+    absl::flat_hash_map<int, int>* quant_conversion_map,
+    absl::flat_hash_map<int, Value*>* tensor_to_value) {
   for (int i = 0; i < io_tensors->size; ++i) {
     const int tensor_index = io_tensors->data[i];
     const TfLiteTensor& tflite_tensor = context->tensors[tensor_index];
@@ -2899,7 +2725,7 @@ absl::Status PrecreateIOTensors(
 absl::Status BuildModel(TfLiteContext* context,
                         const TfLiteDelegateParams* delegate_params,
                         GraphFloat32* graph,
-                        std::unordered_map<int, int>* quant_conversion_map) {
+                        absl::flat_hash_map<int, int>* quant_conversion_map) {
   std::vector<std::unique_ptr<TFLiteOperationParser>> operations;
   std::vector<int> tflite_nodes;
   for (int i = 0; i < delegate_params->nodes_to_replace->size; ++i) {
@@ -2925,7 +2751,7 @@ absl::Status BuildModel(TfLiteContext* context,
     operations.push_back(std::move(op_parser));
     tflite_nodes.push_back(i);
   }
-  std::unordered_map<int, Value*> tensor_to_value;
+  absl::flat_hash_map<int, Value*> tensor_to_value;
   RETURN_IF_ERROR(PrecreateIOTensors(context, graph,
                                      delegate_params->input_tensors,
                                      quant_conversion_map, &tensor_to_value));
@@ -2952,15 +2778,15 @@ absl::Status BuildModel(TfLiteContext* context,
 
 absl::Status BuildFinalModel(
     TfLiteContext* context, const TfLiteDelegateParams* delegate_params,
-    GraphFloat32* graph, std::unordered_map<int, int>* quant_conversion_map) {
+    GraphFloat32* graph, absl::flat_hash_map<int, int>* quant_conversion_map) {
   RETURN_IF_ERROR(
       BuildModel(context, delegate_params, graph, quant_conversion_map));
 
   // Apply general transformations on the graph.
   NullTransformationReporter reporter;
   ModelTransformer transformer(graph, &reporter);
-  if (!ApplyGeneralTransformations(&transformer)) {
-    return absl::InternalError("Graph general transformations failed");
+  if (!ApplyModelTransformations(&transformer)) {
+    return absl::InternalError("Graph transformations failed");
   }
   return absl::OkStatus();
 }

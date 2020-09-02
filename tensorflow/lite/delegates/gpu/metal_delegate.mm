@@ -26,6 +26,7 @@ limitations under the License.
 #include <thread>
 #include <vector>
 
+#include "absl/container/flat_hash_set.h"
 #include "absl/types/span.h"
 #include "tensorflow/lite/builtin_ops.h"
 #include "tensorflow/lite/c/common.h"
@@ -37,7 +38,6 @@ limitations under the License.
 #include "tensorflow/lite/delegates/gpu/common/quantization_util.h"
 #include "tensorflow/lite/delegates/gpu/common/shape.h"
 #include "tensorflow/lite/delegates/gpu/common/status.h"
-#include "tensorflow/lite/delegates/gpu/common/transformations/general_transformations.h"
 #include "tensorflow/lite/delegates/gpu/common/types.h"
 #include "tensorflow/lite/delegates/gpu/metal/api.h"
 #include "tensorflow/lite/delegates/gpu/metal/buffer_convert.h"
@@ -613,7 +613,7 @@ class Delegate {
   // Whenever quantized inference is enabled, this maps the tensor index of each
   // originally quantized (8-bit) tensor to its float version added in
   // model_builder - and vice versa.
-  std::unordered_map<int, int> quant_conversion_map_;
+  absl::flat_hash_map<int, int> quant_conversion_map_;
 
   TFLInferenceContext* inference_context_;
   // input and output buffers are passed into Metal inference engine

@@ -255,6 +255,7 @@ void BaseCollectiveExecutor::ExecuteAsync(OpKernelContext* ctx,
   Tensor* output = ctx->mutable_output(0);
   const Tensor* input = (col_params.instance.type == REDUCTION_COLLECTIVE ||
                          col_params.instance.type == GATHER_COLLECTIVE ||
+                         col_params.instance.type == PERMUTE_COLLECTIVE ||
                          (col_params.instance.type == BROADCAST_COLLECTIVE &&
                           col_params.is_source))
                             ? &ctx->input(0)
@@ -278,7 +279,7 @@ void BaseCollectiveExecutor::ExecuteAsync(OpKernelContext* ctx,
   // Run on an unbounded work queue that can handle blocking work so as to not
   // starve executor threads.
   col_impl->Ref();
-  remote_access_->RunClosure([col_impl, col_ctx, done_safe, ctx]() {
+  RunClosure([col_impl, col_ctx, done_safe, ctx]() {
     core::ScopedUnref unref(col_impl);
     profiler::TraceMe activity(
         [ctx] {
@@ -297,8 +298,8 @@ void BaseCollectiveExecutor::ExecuteAsync(OpKernelContext* ctx,
 }
 
 void BaseCollectiveExecutor::CompleteParamsAsync(
-    const string& device, CollectiveParams* cp, CancellationManager* cancel_mgr,
-    StatusCallback done) {
+    const DeviceAttributes& device, CollectiveParams* cp,
+    CancellationManager* cancel_mgr, StatusCallback done) {
   cp->instance.gpu_ring_order = *gpu_ring_order_;
   const auto is_callback_called = std::make_shared<std::atomic<bool>>(false);
   auto done_with_timeout = done;
