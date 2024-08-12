@@ -27,7 +27,7 @@ limitations under the License.
 
 #include "absl/types/span.h"
 #include "tensorflow/lite/builtin_ops.h"
-#include "tensorflow/lite/c/common.h"
+#include "tensorflow/lite/core/c/common.h"
 #include "tensorflow/lite/delegates/gpu/common/convert.h"
 #include "tensorflow/lite/delegates/gpu/common/model.h"
 #include "tensorflow/lite/delegates/gpu/common/model_builder.h"
@@ -136,8 +136,7 @@ class Delegate {
     RETURN_IF_ERROR(BuildModel(context, delegate_params, &graph));
 
     // Apply general transformations on the graph.
-    NullTransformationReporter reporter;
-    ModelTransformer transformer(&graph, &reporter);
+    ModelTransformer transformer(&graph);
     if (!ApplyModelTransformations(&transformer)) {
       return absl::InternalError("Graph transformations failed");
     }
@@ -277,13 +276,6 @@ class Delegate {
   }
 
   absl::Status Invoke(TfLiteContext* context) {
-    const EGLContext egl_context_at_delegate_init = env_->context().context();
-    const EGLContext egl_context_at_delegate_invoke = eglGetCurrentContext();
-    if (egl_context_at_delegate_init != egl_context_at_delegate_invoke) {
-      return absl::FailedPreconditionError(
-          "Delegate should run on the same thread where it was initialized.");
-    }
-
     // Push input data from a tensor to GPU.
     for (ValueId id : inputs_) {
       const ValueRef& ref = tensors_[id];

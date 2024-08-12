@@ -22,19 +22,17 @@ limitations under the License.
 #include "tensorflow/c/eager/abstract_tensor_handle.h"
 #include "tensorflow/c/eager/immediate_execution_operation.h"
 #include "tensorflow/c/eager/immediate_execution_tensor_handle.h"
-#include "tensorflow/core/common_runtime/eager/context.h"
 #include "tensorflow/core/framework/function.pb.h"
-#include "tensorflow/core/platform/errors.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/status.h"
 #include "tensorflow/core/protobuf/saved_object_graph.pb.h"
 #include "tensorflow/core/protobuf/struct.pb.h"
+#include "tsl/platform/errors.h"
 
 namespace tensorflow {
 
 FlatTensorFunction::FlatTensorFunction(
-    const std::string& name,
-    std::vector<ImmediateExecutionTensorHandle*> captures,
+    const std::string& name, std::vector<ImmediateTensorHandlePtr> captures,
     ImmediateExecutionContext* ctx)
     : name_(name), captures_(std::move(captures)), ctx_(ctx) {}
 
@@ -42,7 +40,7 @@ FlatTensorFunction::~FlatTensorFunction() {
   Status status = ctx_->RemoveFunction(name_);
   if (!status.ok()) {
     LOG(ERROR) << "Failed to remove functiondef " << name_ << ". "
-               << status.error_message();
+               << status.message();
   }
 }
 
@@ -51,8 +49,15 @@ Status FlatTensorFunction::Create(
     std::vector<ImmediateExecutionTensorHandle*> captures,
     ImmediateExecutionContext* ctx, std::unique_ptr<FlatTensorFunction>* out) {
   TF_RETURN_IF_ERROR(ctx->AddFunctionDef(*function_def));
+  std::vector<ImmediateTensorHandlePtr> owned_captures;
+  owned_captures.reserve(captures.size());
+  for (ImmediateExecutionTensorHandle* capture : captures) {
+    capture->Ref();
+    owned_captures.push_back(ImmediateTensorHandlePtr(capture));
+  }
+
   out->reset(new FlatTensorFunction(function_def->signature().name(),
-                                    std::move(captures), ctx));
+                                    std::move(owned_captures), ctx));
   return Status();
 }
 

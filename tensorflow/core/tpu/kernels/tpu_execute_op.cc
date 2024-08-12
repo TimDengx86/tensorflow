@@ -14,48 +14,70 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/core/tpu/kernels/tpu_execute_op.h"
 
+#include <cstdint>
+#include <memory>
+#include <string>
 #include <utility>
+#include <vector>
 
 #include "absl/container/flat_hash_map.h"
-#include "absl/memory/memory.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
 #include "absl/types/span.h"
+#include "tensorflow/compiler/jit/variable_info.h"
+#include "tensorflow/compiler/jit/variable_info_util.h"
 #include "tensorflow/compiler/jit/xla_device.h"
-#include "tensorflow/compiler/jit/xla_launch_util.h"
 #include "tensorflow/compiler/jit/xla_tensor.h"
 #include "tensorflow/compiler/tf2xla/shape_util.h"
 #include "tensorflow/compiler/tf2xla/tf2xla_util.h"
-#include "tensorflow/compiler/xla/debug_options_flags.h"
-#include "tensorflow/compiler/xla/service/dump.h"
-#include "tensorflow/compiler/xla/service/executable.h"
-#include "tensorflow/compiler/xla/service/maybe_owning_device_memory.h"
-#include "tensorflow/compiler/xla/shape_util.h"
-#include "tensorflow/compiler/xla/statusor.h"
-#include "tensorflow/compiler/xla/xla_data.pb.h"
-#include "tensorflow/core/framework/allocator.h"
+#include "xla/debug_options_flags.h"
+#include "xla/literal.h"
+#include "xla/service/backend.h"
+#include "xla/service/computation_placer.h"
+#include "xla/service/dump.h"
+#include "xla/service/executable.h"
+#include "xla/service/maybe_owning_device_memory.h"
+#include "xla/service/shaped_buffer.h"
+#include "xla/service/transfer_manager.h"
+#include "xla/shape.h"
+#include "xla/shape_tree.h"
+#include "xla/shape_util.h"
+#include "xla/status_macros.h"
+#include "xla/stream_executor/device_memory.h"
+#include "xla/stream_executor/device_memory_allocator.h"
+#include "xla/stream_executor/event.h"
+#include "xla/stream_executor/stream.h"
+#include "xla/stream_executor/tpu/tpu_node_context.h"
+#include "xla/xla_data.pb.h"
 #include "tensorflow/core/framework/node_def_util.h"
-#include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/op_requires.h"
+#include "tensorflow/core/framework/resource_handle.h"
 #include "tensorflow/core/framework/resource_mgr.h"
 #include "tensorflow/core/framework/resource_var.h"
 #include "tensorflow/core/framework/tensor.h"
-#include "tensorflow/core/framework/types.h"
-#include "tensorflow/core/lib/core/errors.h"
-#include "tensorflow/core/platform/casts.h"
-#include "tensorflow/core/platform/tracing.h"
+#include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/types.pb.h"
+#include "tensorflow/core/platform/refcount.h"
+#include "tensorflow/core/platform/status.h"
+#include "tensorflow/core/platform/tstring.h"
+#include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/profiler/lib/traceme.h"
 #include "tensorflow/core/tpu/kernels/tpu_compilation_cache_entry.h"
-#include "tensorflow/core/tpu/kernels/tpu_compilation_cache_external.h"
 #include "tensorflow/core/tpu/kernels/tpu_compilation_cache_interface.h"
-#include "tensorflow/core/tpu/kernels/tpu_compilation_cache_local_lookup.h"
 #include "tensorflow/core/tpu/kernels/tpu_compilation_cache_lookup.h"
 #include "tensorflow/core/tpu/kernels/tpu_executable_info.pb.h"
 #include "tensorflow/core/tpu/kernels/tpu_op_consts.h"
+#include "tensorflow/core/tpu/kernels/tpu_program_group.h"
 #include "tensorflow/core/tpu/tpu_configuration.h"
 #include "tensorflow/core/tpu/tpu_defs.h"
 #include "tensorflow/core/tpu/tpu_execute.h"
-#include "tensorflow/core/util/stream_executor_util.h"
-#include "tensorflow/stream_executor/device_memory_allocator.h"
-#include "tensorflow/stream_executor/tpu/tpu_node_context.h"
+#include "tsl/platform/casts.h"
+#include "tsl/platform/errors.h"
+#include "tsl/platform/logging.h"  // IWYU pragma: keep
+#include "tsl/platform/macros.h"
+#include "tsl/platform/statusor.h"
 
 namespace tensorflow {
 namespace {
@@ -66,15 +88,15 @@ using ::tensorflow::tpu::TpuNodeContext;
 // Looks up the input `key` in the compilation cache, populating
 // `*rendezvous_key_base` and `*entry`.
 Status GetComputationCacheEntry(
-    OpKernelContext* context, string* rendezvous_key_base,
+    OpKernelContext* context, std::string* rendezvous_key_base,
     std::unique_ptr<CompilationCacheEntryRef>* entry) {
   const Tensor* key;
   TF_RETURN_IF_ERROR(context->input("key", &key));
-  profiler::TraceMe trace_me("TpuExecuteOp::LookupProto", /*level=*/2);
+  tsl::profiler::TraceMe trace_me("TpuExecuteOp::LookupProto", /*level=*/2);
   if (!TensorShapeUtils::IsVector(key->shape()) ||
-      key->shape().dim_size(0) != 2) {
-    return errors::InvalidArgument(
-        "Key argument to TPUExecute must be a 2-element vector");
+      key->shape().dim_size(0) != 3) {
+    return absl::InvalidArgumentError(
+        "Key argument to TPUExecute must be a 3-element vector");
   }
 
   ResourceMgr* rmgr = GetTPUConfigResourceMgr();
@@ -85,7 +107,7 @@ Status GetComputationCacheEntry(
   core::ScopedUnref lookup_unref(proto_lookup);
   TF_RETURN_IF_ERROR(proto_lookup->Lookup(key->vec<tstring>()(0), entry));
   *rendezvous_key_base = key->vec<tstring>()(1);
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 struct VariableUpdateMap {
@@ -102,12 +124,12 @@ struct VariableUpdateMap {
 
 // Creates a VariableUpdateMap from both the compilation and the fused variable
 // reads/updates.
-xla::StatusOr<VariableUpdateMap> BuildVariableUpdateMap(
+absl::StatusOr<VariableUpdateMap> BuildVariableUpdateMap(
     absl::Span<const TPUExecutableInfoProto::UpdateIndexPair* const>
         compiled_variable_updates,
     absl::Span<int const> fused_device_var_reads_in_computation_inputs,
     const std::vector<int>& fused_device_var_updates_in_computation_outputs,
-    int64 computation_output_count) {
+    int64_t computation_output_count) {
   VariableUpdateMap map;
   auto add_pair = [&](int input, int output, bool from_compilation) -> Status {
     TF_RET_CHECK(map.input_to_output.emplace(input, output).second)
@@ -118,7 +140,7 @@ xla::StatusOr<VariableUpdateMap> BuildVariableUpdateMap(
                        .second)
           << "Duplicate variable output index: " << output;
     }
-    return Status::OK();
+    return absl::OkStatus();
   };
 
   // First add the updates produced by the compilation. Not all variables are
@@ -132,7 +154,7 @@ xla::StatusOr<VariableUpdateMap> BuildVariableUpdateMap(
   }
   TF_RET_CHECK(num_updated_variables <= computation_output_count)
       << num_updated_variables << " <= " << computation_output_count;
-  int64 compiled_variable_output_index =
+  int64_t compiled_variable_output_index =
       computation_output_count - num_updated_variables;
   for (auto update : compiled_variable_updates) {
     map.input_in_compiled_update_order.push_back(update->index());
@@ -148,7 +170,7 @@ xla::StatusOr<VariableUpdateMap> BuildVariableUpdateMap(
   // Now add the updates from the attributes.
   TF_RET_CHECK(fused_device_var_reads_in_computation_inputs.size() ==
                fused_device_var_updates_in_computation_outputs.size());
-  for (int64 i = 0; i < fused_device_var_reads_in_computation_inputs.size();
+  for (int64_t i = 0; i < fused_device_var_reads_in_computation_inputs.size();
        ++i) {
     TF_RETURN_IF_ERROR(
         add_pair(fused_device_var_reads_in_computation_inputs[i],
@@ -172,11 +194,10 @@ struct InputBuffers {
                                    int device_ordinal) {
     CHECK_NE(allocator, nullptr);
     xla::ShapedBuffer shaped_buffer(std::move(host_shape), buffers.shape(),
-                                    allocator->platform(), device_ordinal);
+                                    device_ordinal);
     shaped_buffer.set_buffers(buffers.Map<se::DeviceMemoryBase>(
-        [](xla::MaybeOwningDeviceMemory* buffer) {
-          CHECK(buffer);
-          return buffer->AsDeviceMemoryBase();
+        [](const xla::MaybeOwningDeviceMemory& buffer) {
+          return buffer.AsDeviceMemoryBase();
         }));
     return shaped_buffer;
   }
@@ -193,19 +214,19 @@ struct InputBuffers {
 };
 
 // Builds an InputBuffers object that describes the inputs to the computation.
-xla::StatusOr<std::unique_ptr<InputBuffers>> BuildComputationInputs(
+absl::StatusOr<std::unique_ptr<InputBuffers>> BuildComputationInputs(
     OpKernelContext* context, const xla::Shape& input_host_shape,
     const VariableUpdateMap& variable_updates, xla::Backend* backend,
     int device_ordinal, se::Stream* stream) {
-  profiler::TraceMe trace_me("BuildComputationInputs", /*level=*/2);
+  tsl::profiler::TraceMe trace_me("BuildComputationInputs", /*level=*/2);
   OpInputList arg_list;
   TF_RETURN_IF_ERROR(context->input_list("args", &arg_list));
 
   if (arg_list.size() != xla::ShapeUtil::TupleElementCount(input_host_shape)) {
-    return errors::InvalidArgument(
-        "Number of parameters (", arg_list.size(),
-        ") does not match input shape: ",
-        xla::ShapeUtil::TupleElementCount(input_host_shape));
+    return absl::InvalidArgumentError(
+        absl::StrCat("Number of parameters (", arg_list.size(),
+                     ") does not match input shape: ",
+                     xla::ShapeUtil::TupleElementCount(input_host_shape)));
   }
 
   auto validate_shape = [&](int i, const Tensor& tensor) {
@@ -217,23 +238,27 @@ xla::StatusOr<std::unique_ptr<InputBuffers>> BuildComputationInputs(
     if (xla_tensor == nullptr) {
       // FromTensor failed; tensor must be empty.
       if (!xla::ShapeUtil::IsZeroElementArray(expected)) {
-        return errors::InvalidArgument(
+        return absl::InvalidArgumentError(absl::StrCat(
             "Run-time shape mismatch for TPUExecute argument[", i, "] (",
             context->op_kernel().requested_input(i), "). Expected ",
-            expected.DebugString(), "; got empty tensor");
+            expected.DebugString(),
+            "; got empty tensor. If you are running "
+            "with TF2 TPU, make sure you set `drop_remainder=False` when "
+            "calling `dataset.batch` on the `tf.data.Dataset` so dynamic batch "
+            "size can be handled"));
       }
     } else {
       // Compare host shapes, easier than getting the expected device shape.
       const xla::Shape& xla_shape = xla_tensor->shaped_buffer().on_host_shape();
       if (!xla::ShapeUtil::Compatible(expected, xla_shape)) {
-        return errors::InvalidArgument(
+        return absl::InvalidArgumentError(absl::StrCat(
             "Run-time shape mismatch for TPUExecute argument[", i, "] (",
             context->op_kernel().requested_input(i), "). Expected ",
-            expected.DebugString(), "; got ", xla_shape.DebugString());
+            expected.DebugString(), "; got ", xla_shape.DebugString()));
       }
     }
 
-    return Status::OK();
+    return absl::OkStatus();
   };
 
   // Iterate over the inputs, validating the shapes of non-variable inputs,
@@ -242,6 +267,7 @@ xla::StatusOr<std::unique_ptr<InputBuffers>> BuildComputationInputs(
   std::vector<VariableInfo> variables;
   std::vector<int> variable_index(arg_list.size(), -1);
   variables.reserve(arg_list.size());
+  ResourceHandle handle;
   for (int i = 0; i < arg_list.size(); ++i) {
     // Arguments are assumed to be variables if they have a resource type.
     // (Non-variable resources are not supported.)
@@ -249,7 +275,7 @@ xla::StatusOr<std::unique_ptr<InputBuffers>> BuildComputationInputs(
       variable_index[i] = variables.size();
       // TODO(phawkins): we may be looking up many variables here; it would be
       // better if we did not repeatedly acquire the resource manager's lock.
-      const ResourceHandle& handle = HandleFromInput(context, i);
+      TF_RETURN_IF_ERROR(HandleFromInput(context, i, &handle));
       Var* variable;
       TF_RETURN_IF_ERROR(LookupResource(context, handle, &variable));
       variables.push_back(VariableInfo(i, handle.name(), variable));
@@ -274,11 +300,11 @@ xla::StatusOr<std::unique_ptr<InputBuffers>> BuildComputationInputs(
   se::DeviceMemoryAllocator* const allocator = backend->memory_allocator();
   xla::TransferManager* const transfer_manager = backend->transfer_manager();
 
-  auto input_buffers = absl::make_unique<InputBuffers>(
+  auto input_buffers = std::make_unique<InputBuffers>(
       transfer_manager->HostShapeToDeviceShape(input_host_shape));
 
   // Allocates a buffer for the root tuple.
-  const int64 root_size =
+  const int64_t root_size =
       transfer_manager->GetByteSizeRequirement(input_buffers->buffers.shape());
   TF_ASSIGN_OR_RETURN(*input_buffers->buffers.mutable_element({}),
                       allocator->Allocate(device_ordinal, root_size));
@@ -291,7 +317,7 @@ xla::StatusOr<std::unique_ptr<InputBuffers>> BuildComputationInputs(
     buffers->buffers().ForEachMutableElement([&](const xla::ShapeIndex& index,
                                                  se::DeviceMemoryBase* buffer) {
       xla::ShapeIndex in_index = {arg_index};
-      for (int64 j : index) {
+      for (int64_t j : index) {
         in_index.push_back(j);
       }
       auto* in_buffer = input_buffers->buffers.mutable_element(in_index);
@@ -307,7 +333,7 @@ xla::StatusOr<std::unique_ptr<InputBuffers>> BuildComputationInputs(
   // Assigns the buffers of 'tensor' as computation input 'i'. Allocates fresh
   // buffers for zero-element tensors where required.
   auto assign_input = [&](int i, const Tensor& tensor,
-                          bool may_reuse) -> xla::Status {
+                          bool may_reuse) -> absl::Status {
     XlaTensor* xla_tensor = XlaTensor::FromTensor(&tensor);
 
     // Size 0 tensors have no backing XlaTensor, but may still need to have
@@ -328,7 +354,7 @@ xla::StatusOr<std::unique_ptr<InputBuffers>> BuildComputationInputs(
                                &xla_tensor->shaped_buffer());
       xla_tensor->WaitForDefinitionEventOnStream(stream);
     }
-    return Status::OK();
+    return absl::OkStatus();
   };
 
   for (int i = 0; i < arg_list.size(); ++i) {
@@ -387,7 +413,7 @@ struct OutputBuffers {
 // any output buffers that do not have corresponding output tensors. The latter
 // may happen for zero-element tensors of type int64 or complex64 which still
 // require a tuple buffer but do not have a corresponding XlaTensor.
-xla::StatusOr<std::unique_ptr<OutputBuffers>> AllocateOutputTensors(
+absl::StatusOr<std::unique_ptr<OutputBuffers>> AllocateOutputTensors(
     OpKernelContext* context, xla::ScopedShapedBuffer scoped_buffers,
     absl::Span<const TensorShapeProto* const> output_tensor_shape_protos,
     const VariableUpdateMap& variable_updates, TpuNodeContext* node_context,
@@ -395,14 +421,14 @@ xla::StatusOr<std::unique_ptr<OutputBuffers>> AllocateOutputTensors(
     const std::shared_ptr<se::Event>& definition_event) {
   VLOG(4) << "Output buffers: " << scoped_buffers.ToString();
 
-  profiler::TraceMe trace_me("AllocateOutputTensors", /*level=*/2);
+  tsl::profiler::TraceMe trace_me("AllocateOutputTensors", /*level=*/2);
   // Shapes of the outputs, in TensorShape form.
-  const int64 sub_elements =
+  const int64_t sub_elements =
       xla::ShapeUtil::TupleElementCount(scoped_buffers.on_host_shape());
   if (sub_elements != output_tensor_shape_protos.size()) {
-    return errors::InvalidArgument(
-        "Mismatched numbers of output shapes: ", sub_elements, " vs. ",
-        output_tensor_shape_protos.size());
+    return absl::InvalidArgumentError(
+        absl::StrCat("Mismatched numbers of output shapes: ", sub_elements,
+                     " vs. ", output_tensor_shape_protos.size()));
   }
 
   xla::TransferManager* const transfer_manager =
@@ -410,7 +436,7 @@ xla::StatusOr<std::unique_ptr<OutputBuffers>> AllocateOutputTensors(
 
   std::vector<TensorShape> output_tensor_shapes;
   output_tensor_shapes.reserve(sub_elements);
-  for (int64 i = 0; i < sub_elements; ++i) {
+  for (int64_t i = 0; i < sub_elements; ++i) {
     TF_RETURN_IF_ERROR(
         TensorShape::IsValidShape(*output_tensor_shape_protos[i]));
     TensorShape shape(*output_tensor_shape_protos[i]);
@@ -418,9 +444,9 @@ xla::StatusOr<std::unique_ptr<OutputBuffers>> AllocateOutputTensors(
         xla::ShapeUtil::GetSubshape(scoped_buffers.on_host_shape(), {i});
     if (!xla_shape.IsArray() ||
         xla::ShapeUtil::ElementsIn(xla_shape) != shape.num_elements()) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(absl::StrCat(
           "Mismatched number of elements in output shape: ",
-          xla::ShapeUtil::HumanString(xla_shape), " vs ", shape.DebugString());
+          xla::ShapeUtil::HumanString(xla_shape), " vs ", shape.DebugString()));
     }
     output_tensor_shapes.push_back(shape);
   }
@@ -433,18 +459,16 @@ xla::StatusOr<std::unique_ptr<OutputBuffers>> AllocateOutputTensors(
       node_context->backend()->memory_allocator();
 
   auto output_buffers =
-      absl::make_unique<OutputBuffers>(std::move(scoped_buffers), allocator);
+      std::make_unique<OutputBuffers>(std::move(scoped_buffers), allocator);
 
-  xla::Shape output_host_shape = output_buffers->buffers.on_host_shape();
   xla::Shape output_device_shape = output_buffers->buffers.on_device_shape();
 
-  if (!output_host_shape.is_static()) {
+  if (!output_device_shape.is_static()) {
     TF_RETURN_IF_ERROR(transfer_manager->ReadDynamicShapes(
-        stream, &output_buffers->buffers, &output_host_shape,
-        &output_device_shape));
-    for (int64 i = 0; i < sub_elements; ++i) {
+        stream, &output_buffers->buffers, &output_device_shape));
+    for (int64_t i = 0; i < sub_elements; ++i) {
       const xla::Shape& subshape =
-          xla::ShapeUtil::GetSubshape(output_host_shape, {i});
+          xla::ShapeUtil::GetSubshape(output_device_shape, {i});
       TensorShape shape;
       TF_RETURN_IF_ERROR(XLAShapeToTensorShape(subshape, &shape));
       output_tensor_shapes[i] = shape;
@@ -454,8 +478,6 @@ xla::StatusOr<std::unique_ptr<OutputBuffers>> AllocateOutputTensors(
   // Transfers ownership of the buffers that back XLA computation output 'i'
   // to 'output_tensor'.
   auto transfer_buffers = [&](int i, Tensor* output_tensor) {
-    const xla::Shape& host_shape =
-        xla::ShapeUtil::GetTupleElementShape(output_host_shape, i);
     const xla::Shape& device_shape =
         xla::ShapeUtil::GetTupleElementShape(output_device_shape, i);
 
@@ -464,12 +486,12 @@ xla::StatusOr<std::unique_ptr<OutputBuffers>> AllocateOutputTensors(
     // backing XlaTensor, so we let retain 'output_buffers' ownership of any
     // buffers in that case.
     if (output_tensor->NumElements() > 0) {
-      xla::ScopedShapedBuffer shaped_buffer(host_shape, device_shape, allocator,
+      xla::ScopedShapedBuffer shaped_buffer(device_shape, allocator,
                                             device_ordinal);
       shaped_buffer.buffers().ForEachMutableElement(
           [&](const xla::ShapeIndex& index, se::DeviceMemoryBase* buffer) {
             xla::ShapeIndex out_index = {i};
-            for (int64 j : index) {
+            for (int64_t j : index) {
               out_index.push_back(j);
             }
             *buffer = output_buffers->buffers.buffers().element(out_index);
@@ -547,19 +569,14 @@ xla::StatusOr<std::unique_ptr<OutputBuffers>> AllocateOutputTensors(
     }
     ++compiled_update_index;
     const int variable_index = input_buffers->variable_index.at(input_index);
-    PersistentTensor unused;
-    Tensor* output_tensor;
     if (variable_index >= 0) {
       // This output corresponds to a DT_RESOURCE input to the TPUExecute
       // operator. Update the corresponding variable.
       VariableInfo& var = input_buffers->variables[variable_index];
-      // TODO(b/35625933): the correct thing to do would be to transfer
-      // ownership of the PersistentTensor into the Var object. However, Var
-      // contains a Tensor so we can't.
-      TF_RETURN_IF_ERROR(context->allocate_persistent(
-          var.var()->tensor()->dtype(), output_tensor_shapes[i], &unused,
-          &output_tensor));
-      *var.var()->tensor() = *output_tensor;
+      TF_RETURN_IF_ERROR(context->allocate_temp(var.var()->tensor()->dtype(),
+                                                output_tensor_shapes[i],
+                                                var.var()->tensor()));
+      transfer_buffers(i, var.var()->tensor());
     } else {
       // This output corresponds to a non-resource input to the TPUExecute
       // operator. This case occurs for the distributed TPU rewrite which
@@ -569,11 +586,12 @@ xla::StatusOr<std::unique_ptr<OutputBuffers>> AllocateOutputTensors(
       // TODO(phawkins): remove this case when placement of variables on TPU
       // devices is well supported and we no longer need to place "remote"
       // variables on CPU devices.
+      Tensor* output_tensor;
       TF_RETURN_IF_ERROR(context->allocate_output(
           op_output_index, output_tensor_shapes[i], &output_tensor));
       ++op_output_index;
+      transfer_buffers(i, output_tensor);
     }
-    transfer_buffers(i, output_tensor);
   }
 
   // Process any remaining non-updated variables.
@@ -628,17 +646,17 @@ Status TPUExecuteOp::DoWork(OpKernelContext* context) {
   TF_ASSIGN_OR_RETURN(std::unique_ptr<TpuNodeContext> node_context,
                       TpuNodeContext::Create(device_ordinal));
 
-  profiler::TraceMe trace_me(
+  tsl::profiler::TraceMe trace_me(
       [device_ordinal, context] {
-        return profiler::TraceMeEncode(
+        return tsl::profiler::TraceMeEncode(
             "TpuExecuteOp", {{"device_ordinal", device_ordinal},
                              {"id", context->step_id()},
                              {"iter_num", context->frame_iter().iter_id}});
       },
       /*level=*/2);
-  profiler::TraceMe trace_me_init("TPUExecuteOp::Init", /*level=*/2);
+  tsl::profiler::TraceMe trace_me_init("TPUExecuteOp::Init", /*level=*/2);
 
-  string rendezvous_key_base;
+  std::string rendezvous_key_base;
   std::unique_ptr<CompilationCacheEntryRef> entry_ref;
   TF_RETURN_IF_ERROR(
       GetComputationCacheEntry(context, &rendezvous_key_base, &entry_ref));
@@ -693,7 +711,7 @@ Status TPUExecuteOp::DoWork(OpKernelContext* context) {
                                                      shaped_buffer)) {
     TF_RETURN_IF_ERROR(transfer_manager->WriteRootTupleIndexTable(
         transfer_stream_ptr.get(), shaped_buffer));
-    stream->ThenWaitFor(transfer_stream_ptr.get());
+    TF_RETURN_IF_ERROR(stream->WaitFor(transfer_stream_ptr.get()));
   } else {
     TF_RETURN_IF_ERROR(
         transfer_manager->WriteRootTupleIndexTable(stream, shaped_buffer));
@@ -720,9 +738,8 @@ Status TPUExecuteOp::DoWork(OpKernelContext* context) {
         });
   }
 
-  auto definition_event = std::make_shared<se::Event>(stream->parent());
-  TF_RET_CHECK(definition_event->Init())
-      << "TPU definition event initialization failed";
+  TF_ASSIGN_OR_RETURN(std::shared_ptr<se::Event> definition_event,
+                      stream->parent()->CreateEvent());
 
   trace_me_init.Stop();
 
@@ -759,7 +776,7 @@ Status TPUExecuteOp::DoWork(OpKernelContext* context) {
                  device_assignment.get(), context->cancellation_manager(),
                  context, stream, transfer_stream_ptr.get(),
                  tpu_program_group->tpu_program(core_index)));
-  stream->ThenRecordEvent(definition_event.get());
+  TF_RETURN_IF_ERROR(stream->RecordEvent(definition_event.get()));
 
   TF_ASSIGN_OR_RETURN(
       std::unique_ptr<OutputBuffers> output_buffers,
@@ -786,7 +803,7 @@ Status TPUExecuteOp::DoWork(OpKernelContext* context) {
                                    xla::GetDebugOptionsFromFlags());
         });
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 TPUExecuteOp::~TPUExecuteOp() = default;

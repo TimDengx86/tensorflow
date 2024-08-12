@@ -1,8 +1,10 @@
 # Tests for the C++ header-only base types.
 load("//tensorflow:tensorflow.bzl", "tf_cc_test")
+load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
 
 package(
-    licenses = ["notice"],  # Apache 2.0
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
+    licenses = ["notice"],
 )
 
 cc_library(
@@ -24,9 +26,10 @@ tf_cc_test(
         "//tensorflow/c:tf_datatype",
         "//tensorflow/cc/experimental/base/public:status",
         "//tensorflow/cc/experimental/base/public:tensor",
-        "//tensorflow/core:lib",
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
+        "@com_google_absl//absl/types:span",
+        "@com_google_googletest//:gtest_main",
     ],
 )
 
@@ -43,8 +46,9 @@ tf_cc_test(
         "//tensorflow/cc/experimental/base/public:status",
         "//tensorflow/cc/experimental/base/public:tensor",
         "//tensorflow/cc/experimental/base/public:tensorhandle",
-        "//tensorflow/core:lib",
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
+        "@com_google_absl//absl/types:span",
+        "@com_google_googletest//:gtest_main",
     ],
 )

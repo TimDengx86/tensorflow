@@ -19,7 +19,7 @@ limitations under the License.
 #include <memory>
 
 #include "grpcpp/server_builder.h"
-#include "tensorflow/core/distributed_runtime/rpc/grpc_call.h"
+#include "xla/tsl/distributed_runtime/rpc/grpc_call.h"
 #include "tensorflow/core/lib/core/threadpool.h"
 #include "tensorflow/core/tpu/kernels/tpu_compilation_cache_common.pb.h"
 #include "tensorflow/core/tpu/kernels/tpu_compilation_cache_grpc.h"
@@ -47,8 +47,9 @@ class TpuCompilationCacheService {
  private:
   void HandleRPCsLoop();
 
-  using GetTpuProgramCall = Call<TpuCompilationCacheService, AsyncService,
-                                 tpu::GetTpuProgramRequest, ::grpc::ByteBuffer>;
+  using GetTpuProgramCall =
+      tsl::Call<TpuCompilationCacheService, AsyncService,
+                tpu::GetTpuProgramRequest, ::grpc::ByteBuffer>;
 
   // Schedule the cache fetch into the serving thread pool.
   void HandleGetTpuProgram(GetTpuProgramCall* call);
@@ -56,7 +57,7 @@ class TpuCompilationCacheService {
   // Performs the actual cache fetch and serialization.
   void GetTpuProgram(GetTpuProgramCall* call);
 
-  std::atomic<bool> running_ = true;
+  std::atomic<bool> running_;
   tpu::TpuCompilationCacheInterface* cache_;
   ::grpc::ServerBuilder* server_builder_;
   std::unique_ptr<::grpc::Server> server_;

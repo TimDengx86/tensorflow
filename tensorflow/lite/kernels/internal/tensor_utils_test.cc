@@ -16,8 +16,10 @@ limitations under the License.
 
 #include <math.h>
 
+#include <algorithm>
+
 #include <gmock/gmock.h>
-#include "tensorflow/lite/c/builtin_op_data.h"
+#include "tensorflow/lite/core/c/builtin_op_data.h"
 #include "tensorflow/lite/kernels/cpu_backend_context.h"
 #include "tensorflow/lite/kernels/internal/common.h"
 #include "tensorflow/lite/kernels/internal/quantization_util.h"
@@ -29,6 +31,29 @@ limitations under the License.
 
 namespace tflite {
 namespace tensor_utils {
+
+// Normally we should require bit-for-bit exact results. Unfortunately a bug
+// in the Intel arm_neon_sse.h translation header that we use for x86 tests
+// causes 1-bit inaccuracy in the vqrdmulh_n_s32 intrinsic, which causes
+// off-by-1 errors. So we have to live with a
+// few off-by-one errors for now, yet still ensure that no more than a small
+// minority of values are wrong.
+// This util is to compare the rounding results for integer-output.
+template <typename T>
+void CompareRoundingResults(int flat_size, const T* expected_result,
+                            const T* real_result, int max_element_tolerance = 1,
+                            int max_total_tolerance = 5) {
+  int max_diff = 0;
+  int64_t total_diff = 0;
+  for (int i = 0; i < flat_size; i++) {
+    int diff = static_cast<int>(std::abs(expected_result[i] - real_result[i]));
+    total_diff += diff;
+    max_diff = std::max(max_diff, diff);
+  }
+
+  EXPECT_LE(max_diff, max_element_tolerance);
+  EXPECT_LE(total_diff, max_total_tolerance);
+}
 
 TEST(uKernels, FloorLog2Test) {
   for (int i = 1; i < 257; ++i) {
@@ -439,7 +464,7 @@ TEST(uKernels, HybridMatrixBatchVectorMultiplyAccumulate8x8_16Test) {
       input_offsets.data(), scratch.data(), row_sums, &compute_row_sums,
       &context);
 
-  const std::vector<float_t> expected_output = {
+  const std::vector<float> expected_output = {
       -228, 1548,  937, -166, -1164, -1578, -278,  303, 839,  -820,  132,
       1733, -1858, 58,  -425, -587,  -228,  1548,  937, -166, -1164, -1578,
       -278, 303,   839, -820, 132,   1733,  -1858, 58,  -425, -587,
@@ -935,9 +960,9 @@ TEST(uKernels, QuantMul8bitArbitrarySclaeTest) {
   CwiseMul(input1.data(), input2.data(), multiplier, shift, 2, 15, 3,
            output.data());
   const std::vector<int8_t> expected_output = {
-      -84,  127, 127, -128, -128, 127,  56,   -128, 127,  -128,
-      -126, 127, -7,  127,  127,  -128, -128, 127,  -128, 127,
-      127,  -33, -20, 127,  -128, -128, -128, -128, 127,  -128,
+      -78,  127, 127, -128, -128, 127,  62,   -128, 127,  -128,
+      -120, 127, -1,  127,  127,  -128, -128, 127,  -128, 127,
+      127,  -27, -14, 127,  -128, -128, -128, -128, 127,  -128,
   };
   EXPECT_THAT(output, testing::ElementsAreArray(expected_output));
 }
@@ -1054,7 +1079,10 @@ MatrixVectorData SetupMatrixVectorData(int rows, int cols, int batch,
     if ((i % 5) == 0 && negative) sign = -1;
     data.vectors.push_back(sign * (i % 50));
   }
-  data.scale_factors = {1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8};
+  for (int i = 0; i < batch; i++) {
+    data.scale_factors.insert(data.scale_factors.end(),
+                              {1, 2, 3, 4, 5, 6, 7, 8});
+  }
   data.results.resize(rows * batch, init_to_one ? 1 : 0);
 
   data.zeroed_matrix = data.matrix;
@@ -1159,16 +1187,13 @@ TEST(uKernels, DotprodMatrixBatchVectorMultiplyAccumulateTest) {
               testing::ElementsAre(10416, 26288, 8490, 23312, 18276, 70756,
                                    37416, 60916));
 
-  ASSERT_THAT(TestDotprodMatrixBatchVectorMultiply(4, 32, 3),
-              testing::ElementsAre(10416, 26288, 8490, 23312, 18276, 70756,
-                                   37416, 60916, 52080, 142704, 55878, 125712));
-
-  ASSERT_THAT(TestDotprodMatrixBatchVectorMultiply(8, 1024, 3),
-              testing::ElementsAreArray(
-                  {841094,  853168,  866642,  840286,  860760,  862754,
-                   843678,  872552,  1724476, 1769072, 1747588, 1738844,
-                   1758240, 1742916, 1761612, 1755808, 2506896, 2564262,
-                   2629188, 2515824, 2598390, 2569236, 2537352, 2645118}));
+  std::vector<float> results = TestDotprodMatrixBatchVectorMultiply(32, 512, 5);
+  EXPECT_NEAR(415566, results[0], 0.0001);
+  EXPECT_NEAR(880736, results[50], 0.0001);
+  EXPECT_NEAR(1312062, results[72], 0.0001);
+  EXPECT_NEAR(1750384, results[100], 0.0001);
+  EXPECT_NEAR(1776224, results[120], 0.0001);
+  EXPECT_NEAR(2101860, results[150], 0.0001);
 
   const bool kNegative = true;
   ASSERT_THAT(TestDotprodMatrixBatchVectorMultiply(4, 64, 1, kNegative),
@@ -1193,18 +1218,15 @@ TEST(uKernels, PerChannelDotprodMatrixBatchVectorMultiplyAccumulateTest) {
               testing::ElementsAre(10416 / 2, 26288, 8490 / 2, 23312, 18276 / 2,
                                    70756, 37416 / 2, 60916));
 
-  ASSERT_THAT(TestPerChannelDotprodMatrixBatchVectorMultiply(4, 32, 3),
-              testing::ElementsAre(10416 / 2, 26288, 8490 / 2, 23312, 18276 / 2,
-                                   70756, 37416 / 2, 60916, 52080 / 2, 142704,
-                                   55878 / 2, 125712));
-
-  ASSERT_THAT(
-      TestPerChannelDotprodMatrixBatchVectorMultiply(8, 1024, 3),
-      testing::ElementsAreArray(
-          {841094 / 2,  853168,  866642 / 2,  840286,  860760 / 2,  862754,
-           843678 / 2,  872552,  1724476 / 2, 1769072, 1747588 / 2, 1738844,
-           1758240 / 2, 1742916, 1761612 / 2, 1755808, 2506896 / 2, 2564262,
-           2629188 / 2, 2515824, 2598390 / 2, 2569236, 2537352 / 2, 2645118}));
+  std::vector<float> results =
+      TestPerChannelDotprodMatrixBatchVectorMultiply(32, 512, 5);
+  EXPECT_NEAR(207783, results[0], 0.0001);
+  EXPECT_NEAR(411552, results[13], 0.0001);
+  EXPECT_NEAR(835936, results[39], 0.0001);
+  EXPECT_NEAR(440368, results[50], 0.0001);
+  EXPECT_NEAR(875192, results[100], 0.0001);
+  EXPECT_NEAR(1775536, results[123], 0.0001);
+  EXPECT_NEAR(1050930, results[150], 0.0001);
 }
 
 TEST(uKernels, DotprodMatrixBatchFourVectorMultiplyAccumulateDotprodTest) {
@@ -1758,7 +1780,7 @@ TEST(uKernels, VectorBatchVectorCwiseProductAccumulateInteger) {
 
   const std::vector<int16_t> expected_output = {
       /* batch 0 */
-      -35, 34, 32, 30, 27, 24, 20, 16, 11, -2, 10, 13, 16, 18, 19, 20, 21, 21,
+      -35, 34, 32, 30, 27, 24, 20, 16, 11, -1, 10, 13, 16, 18, 19, 20, 21, 21,
       20, 0, 4, 8, 12, 17, 23, 29, 35, 42, 50,
       /* batch 1 */
       27, 24, 20, 18, 15, 14, 12, 12, 1, 2, 2, 6, 10, 15, 20, 26, 32, 39, 26, 9,
@@ -1769,7 +1791,9 @@ TEST(uKernels, VectorBatchVectorCwiseProductAccumulateInteger) {
       /* batch 3 */
       17, 21, 14, 17, 18, 20, 20, 21, 20, 20, 18, -7, 13, 14, 13, 13, 11, 10, 7,
       5, 26, 31, 37, 56, 63, 72, 80, 90, 99};
-  EXPECT_THAT(batch_output, testing::ElementsAreArray(expected_output));
+  // Only allow 1 element difference for the rounding result.
+  CompareRoundingResults<int16_t>(4 * 29, expected_output.data(),
+                                  batch_output.data(), 1, 1);
 }
 
 TEST(uKernels, VectorBatchVectorCwiseProductAccumulateFloat) {
@@ -2051,6 +2075,58 @@ TEST(uKernels, MeanStddevNormalizationAllBatches) {
                           ArrayFloatNear(expected_output, 1.81e-4f)));
 }
 
+TEST(uKernels, MeanStddevNormalizationLargeVector) {
+  const float mean = 100.0f;
+  const float diff = 1.0f;
+  // Some large vector that is not a round multiple of any SIMD vector sizes.
+  // Note this is odd.
+  constexpr int kVectorSize = 16 * 16 + 16 + 1;
+
+  float input[kVectorSize];
+  // First input is mean.
+  input[0] = mean;
+  // Rest is alternating between mean + diff and mean - diff.
+  for (int i = 1; i < kVectorSize - 1; i += 2) {
+    input[i + 0] = mean + diff;
+    input[i + 1] = mean - diff;
+  }
+  float output[kVectorSize];
+  MeanStddevNormalization(input, output, kVectorSize, 1);
+
+  float expected_output[kVectorSize];
+  // First output should be 0.
+  expected_output[0] = 0.0;
+  // Rest should be alternating between ±√(N/(N-1)).
+  const float expected_elem = std::sqrt(static_cast<double>(kVectorSize) /
+                                        static_cast<double>(kVectorSize - 1));
+  for (int i = 1; i < kVectorSize - 1; i += 2) {
+    expected_output[i + 0] = +expected_elem;
+    expected_output[i + 1] = -expected_elem;
+  }
+  EXPECT_THAT(output, testing::Pointwise(testing::FloatEq(), expected_output));
+}
+
+TEST(uKernels, UnpackInt4Basic) {
+  // INT4 ranges from [-8,7], so 0x8 or b'1000 is mapped to -8 in two's
+  // complement. 0xB or b'1011 is mapped to -5. 0xE or b'1110 is mapped to -2.
+  const int8_t input[2] = {0x38, static_cast<int8_t>(0xBE)};
+  const int8_t expected_output[4] = {-8, 3, -2, -5};
+  int8_t actual_output[4];
+  UnpackDenseInt4IntoInt8(input, 4, actual_output);
+  EXPECT_THAT(actual_output,
+              testing::Pointwise(testing::Eq(), expected_output));
+}
+
+TEST(uKernels, UnpackInt4OddLength) {
+  // `num_elements` is odd, so the last element 0x4 should be ignored
+  const int8_t input[2] = {0x21, 0x43};
+  const int8_t expected_output[3] = {1, 2, 3};
+  int8_t actual_output[3];
+  UnpackDenseInt4IntoInt8(input, 3, actual_output);
+  EXPECT_THAT(actual_output,
+              testing::Pointwise(testing::Eq(), expected_output));
+}
+
 }  // namespace tensor_utils
 }  // namespace tflite
 
@@ -2058,7 +2134,7 @@ TEST(uKernels, MeanStddevNormalizationAllBatches) {
 
 // Compile with --copt="-DGOOGLE_COMMANDLINEFLAGS_FULL_API=1" and
 // --copt="-DDOTPROD_BENCHMARKS"
-// Run with --benchmarks=all
+// Run with --benchmark_filter=all
 void BM_DotprodBatchOneMultiply(benchmark::State& state) {
   const int rows = state.range(0);
   const int cols = state.range(1);
@@ -2082,7 +2158,7 @@ void BM_DotprodBatchOneMultiply(benchmark::State& state) {
       tflite::tensor_utils::MatrixBatchVectorMultiplyAccumulate(
           data.matrix.data(), data.rows, data.cols,
           data.vectors.data() + (data.cols * i), data.scale_factors.data(), 1,
-          &data.results[0], 1);
+          &data.results[0]);
       testing::DoNotOptimize(data.results[2]);
     }
   }
@@ -2109,7 +2185,13 @@ BENCHMARK(BM_DotprodBatchOneMultiply)
     ->Args({640, 2048, 8, 8})
     ->Args({2048, 2048, 1, 1})
     ->Args({2048, 2048, 1, 8})
-    ->Args({2048, 2048, 8, 1});
+    ->Args({2048, 2048, 8, 1})
+    ->Args({4096, 4096, 8, 1})
+    ->Args({4096, 4096, 1, 8})
+    ->Args({8192, 8192, 8, 1})
+    ->Args({8192, 8192, 1, 8})
+    ->Args({16384, 16384, 8, 1})
+    ->Args({16384, 16384, 1, 8});
 
 void BM_DotprodBatchFourMultiply(benchmark::State& state) {
   const int rows = state.range(0);
@@ -2132,7 +2214,7 @@ void BM_DotprodBatchFourMultiply(benchmark::State& state) {
     auto& data = datas[copy];
     tflite::tensor_utils::MatrixBatchVectorMultiplyAccumulate(
         data.matrix.data(), data.rows, data.cols, data.vectors.data(),
-        data.scale_factors.data(), data.batch, &data.results[0], 1);
+        data.scale_factors.data(), data.batch, &data.results[0]);
     testing::DoNotOptimize(data.results[2]);
   }
 }
@@ -2166,7 +2248,14 @@ BENCHMARK(BM_DotprodBatchFourMultiply)
     ->Args({2048, 2048, 4, 1})
     ->Args({2048, 2048, 4, 8})
     ->Args({2048, 2048, 5, 1})
-    ->Args({2048, 2048, 8, 1});
+    ->Args({2048, 2048, 8, 1})
+    ->Args({2048, 2048, 64, 1})
+    ->Args({2048, 2048, 1024, 1})
+    ->Args({4096, 4096, 1024, 1})
+    ->Args({8192, 8192, 1024, 1})
+    ->Args({8192, 8192, 1024, 8})
+    ->Args({16384, 16384, 1024, 1})
+    ->Args({16384, 8192, 1024, 1});
 
 void BM_DotprodSparseMultiply(benchmark::State& state) {
   const int rows = state.range(0);
@@ -2208,5 +2297,53 @@ BENCHMARK(BM_DotprodSparseMultiply)
     ->Args({640, 2048, 8, 1})
     ->Args({2048, 2048, 1, 1})
     ->Args({2048, 2048, 8, 1});
+
+void BM_DotprodFloatMultiply(benchmark::State& state) {
+  const int rows = state.range(0);
+  const int cols = state.range(1);
+  const int batch = state.range(2);
+  std::vector<float> matrix(rows * cols);
+  std::fill(matrix.begin(), matrix.end(), 1.0);
+  std::vector<float> vector(cols * batch);
+  std::fill(vector.begin(), vector.end(), 0.3);
+  std::vector<float> output(rows * batch);
+  for (auto _ : state) {
+    std::fill(output.begin(), output.end(), 0.0);
+    tflite::tensor_utils::MatrixBatchVectorMultiplyAccumulate(
+        matrix.data(), rows, cols, vector.data(), batch, output.data());
+  }
+}
+
+BENCHMARK(BM_DotprodFloatMultiply)
+    ->Args({16, 16, 4})
+    ->Args({32, 32, 4})
+    ->Args({64, 64, 4})
+    ->Args({64, 256, 64})
+    ->Args({64, 256, 256})
+    ->Args({64, 256, 1024})
+    ->Args({64, 256, 12544})
+    ->Args({128, 128, 2})
+    ->Args({128, 128, 3})
+    ->Args({128, 128, 4})
+    ->Args({128, 128, 5})
+    ->Args({640, 640, 4})
+    ->Args({992, 992, 8})
+    ->Args({1024, 1024, 2})
+    ->Args({1024, 1024, 3})
+    ->Args({1024, 1024, 4})
+    ->Args({1024, 1024, 5})
+    ->Args({1024, 1024, 8})
+    ->Args({1024, 1024, 8})
+    ->Args({1024, 1024, 256})
+    ->Args({640, 2048, 2})
+    ->Args({640, 2048, 3})
+    ->Args({640, 2048, 4})
+    ->Args({640, 2048, 4})
+    ->Args({640, 2048, 8})
+    ->Args({2048, 2048, 3})
+    ->Args({2048, 2048, 4})
+    ->Args({2048, 2048, 4})
+    ->Args({2048, 2048, 5})
+    ->Args({2048, 2048, 8});
 
 #endif  // DOTPROD_BENCHMARKS

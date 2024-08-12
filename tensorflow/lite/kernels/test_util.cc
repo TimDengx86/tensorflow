@@ -31,24 +31,26 @@ limitations under the License.
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "flatbuffers/flatbuffers.h"  // from @flatbuffers
-#include "tensorflow/core/platform/logging.h"
-#include "tensorflow/lite/c/common.h"
 #include "tensorflow/lite/core/api/op_resolver.h"
+#include "tensorflow/lite/core/c/common.h"
+#include "tensorflow/lite/core/interpreter.h"
+#include "tensorflow/lite/core/kernels/register.h"
+#include "tensorflow/lite/core/model.h"
 #include "tensorflow/lite/core/subgraph.h"
 #include "tensorflow/lite/delegates/nnapi/acceleration_test_util.h"
 #include "tensorflow/lite/delegates/nnapi/nnapi_delegate.h"
-#include "tensorflow/lite/interpreter.h"
 #include "tensorflow/lite/kernels/acceleration_test_util.h"
-#include "tensorflow/lite/kernels/register.h"
 #include "tensorflow/lite/kernels/test_delegate_providers.h"
-#include "tensorflow/lite/model.h"
 #include "tensorflow/lite/nnapi/nnapi_implementation.h"
+#include "tensorflow/lite/schema/schema_conversion_utils.h"
 #include "tensorflow/lite/schema/schema_generated.h"
+#include "tensorflow/lite/simple_planner.h"
 #include "tensorflow/lite/string_type.h"
 #include "tensorflow/lite/string_util.h"
 #include "tensorflow/lite/tools/logging.h"
 #include "tensorflow/lite/tools/versioning/op_version.h"
 #include "tensorflow/lite/version.h"
+#include "tsl/platform/logging.h"
 
 namespace tflite {
 
@@ -79,12 +81,23 @@ std::vector<Matcher<std::complex<float>>> ArrayComplex64Near(
   return matchers;
 }
 
-int SingleOpModel::AddInput(const TensorData& t, bool is_variable) {
+int SingleOpModel::AddInput(const TensorData& t) {
   int id = 0;
   if (t.per_channel_quantization) {
     id = AddTensorPerChannelQuant(t);
   } else {
-    id = AddTensor<float>(t, {}, is_variable);
+    id = AddTensor<float>(t, nullptr, 0);
+  }
+  inputs_.push_back(id);
+  return id;
+}
+
+int SingleOpModel::AddVariableInput(const TensorData& t) {
+  int id = 0;
+  if (t.per_channel_quantization) {
+    id = AddTensorPerChannelQuant(t);
+  } else {
+    id = AddTensor<float>(t, nullptr, 0, true);
   }
   inputs_.push_back(id);
   return id;
@@ -94,13 +107,13 @@ int SingleOpModel::AddIntermediate(TensorType type,
                                    const std::vector<float>& scale,
                                    const std::vector<int64_t>& zero_point) {
   // Currently supports only int16 intermediate types.
-  // TODO(jianlijianli): make use of the type.
   int id = tensors_.size();
   flatbuffers::Offset<QuantizationParameters> q_params =
       CreateQuantizationParameters(builder_, /*min=*/0, /*max=*/0,
                                    builder_.CreateVector<float>(scale),
                                    builder_.CreateVector<int64_t>(zero_point));
-  tensors_.push_back(CreateTensor(builder_, builder_.CreateVector<int>({}),
+  std::vector<int> empty;
+  tensors_.push_back(CreateTensor(builder_, builder_.CreateVector<int>(empty),
                                   type,
                                   /*buffer=*/0,
                                   /*name=*/0, q_params, false));
@@ -115,7 +128,12 @@ int SingleOpModel::AddNullInput() {
 }
 
 int SingleOpModel::AddOutput(const TensorData& t) {
-  int id = AddTensor<float>(t, {});
+  int id = 0;
+  if (t.per_channel_quantization) {
+    id = AddTensorPerChannelQuant(t);
+  } else {
+    id = AddTensor<float>(t, nullptr, 0);
+  }
   outputs_.push_back(id);
   return id;
 }
@@ -130,6 +148,21 @@ void SingleOpModel::SetBuiltinOp(BuiltinOperator type,
       builtin_options,
       /*custom_options=*/0, CustomOptionsFormat_FLEXBUFFERS, 0,
       builder_.CreateVector<int32_t>(intermediates_)));
+}
+
+void SingleOpModel::SetBuiltinOp(BuiltinOperator type,
+                                 BuiltinOptions2 builtin_options_2_type,
+                                 flatbuffers::Offset<void> builtin_options_2) {
+  opcodes_.push_back(CreateOperatorCode(builder_, type, 0, 0));
+  operators_.push_back(CreateOperator(
+      builder_, /*opcode_index=*/0, builder_.CreateVector<int32_t>(inputs_),
+      builder_.CreateVector<int32_t>(outputs_), tflite::BuiltinOptions_NONE,
+      /*builtin_options=*/0, /*custom_options=*/0,
+      CustomOptionsFormat_FLEXBUFFERS, /*mutating_variable_inputs=*/0,
+      builder_.CreateVector<int32_t>(intermediates_),
+      /*large_custom_options_offset=*/0,
+      /*large_custom_options_size=*/0, builtin_options_2_type,
+      builtin_options_2));
 }
 
 void SingleOpModel::SetCustomOp(
@@ -160,7 +193,13 @@ void SingleOpModel::BuildInterpreter(std::vector<std::vector<int>> input_shapes,
                                      int num_threads,
                                      bool allow_fp32_relax_to_fp16,
                                      bool apply_delegate,
-                                     bool allocate_and_delegate) {
+                                     bool allocate_and_delegate,
+                                     bool use_simple_allocator) {
+  input_shapes_ = input_shapes;
+  allow_fp32_relax_to_fp16_ = allow_fp32_relax_to_fp16;
+  apply_delegate_ = apply_delegate;
+  allocate_and_delegate_ = allocate_and_delegate;
+
   auto opcodes = builder_.CreateVector(opcodes_);
   auto operators = builder_.CreateVector(operators_);
   auto tensors = builder_.CreateVector(tensors_);
@@ -180,8 +219,26 @@ void SingleOpModel::BuildInterpreter(std::vector<std::vector<int>> input_shapes,
   uint8_t* buffer_pointer = builder_.GetBufferPointer();
   UpdateOpVersion(buffer_pointer);
 
+  use_simple_allocator |=
+      tflite::KernelTestDelegateProviders::Get()->ConstParams().Get<bool>(
+          tflite::KernelTestDelegateProviders::kUseSimpleAllocator);
+
   if (!resolver_) {
-    auto resolver = new ops::builtin::BuiltinOpResolver();
+    if (!bypass_default_delegates_) {
+      // Check if any delegates are specified via the commandline flags. We also
+      // assume the intention of the test is to test against a particular
+      // delegate, hence bypassing applying TfLite default delegates (i.e. the
+      // XNNPACK delegate).
+      const auto specified_delegates =
+          tflite::KernelTestDelegateProviders::Get()->CreateAllDelegates();
+      if (!specified_delegates.empty()) {
+        bypass_default_delegates_ = true;
+      }
+    }
+    MutableOpResolver* resolver =
+        (bypass_default_delegates_ || use_simple_allocator)
+            ? new ops::builtin::BuiltinOpResolverWithoutDefaultDelegates()
+            : new ops::builtin::BuiltinOpResolver();
     for (const auto& reg : custom_registrations_) {
       resolver->AddCustom(reg.first.data(), reg.second());
     }
@@ -191,6 +248,16 @@ void SingleOpModel::BuildInterpreter(std::vector<std::vector<int>> input_shapes,
             &interpreter_, num_threads) == kTfLiteOk);
 
   CHECK(interpreter_ != nullptr);
+
+  if (use_simple_allocator) {
+    LOG(INFO) << "Use SimplePlanner.\n";
+    tflite::Subgraph& primary_subgraph = interpreter_->primary_subgraph();
+    auto memory_planner = new SimplePlanner(
+        &primary_subgraph.context_,
+        std::unique_ptr<GraphInfo>(primary_subgraph.CreateGraphInfo()));
+    primary_subgraph.memory_planner_.reset(memory_planner);
+    memory_planner->PlanAllocations();
+  }
 
   for (size_t i = 0; i < input_shapes.size(); ++i) {
     const int input_idx = interpreter_->inputs()[i];
@@ -211,15 +278,25 @@ TfLiteStatus SingleOpModel::ApplyDelegate() {
   if (delegate_) {
     TFLITE_LOG(WARN) << "Having a manually-set TfLite delegate, and bypassing "
                         "KernelTestDelegateProviders";
-    TF_LITE_ENSURE_STATUS(interpreter_->ModifyGraphWithDelegate(delegate_));
+    SetDelegateApplicationStatus(
+        interpreter_->ModifyGraphWithDelegate(delegate_));
+    TF_LITE_ENSURE_STATUS(*GetDelegateApplicationStatus());
     ++num_applied_delegates_;
   } else {
     auto* delegate_providers = tflite::KernelTestDelegateProviders::Get();
+    // Most TFLite NNAPI delegation tests have been written to run against the
+    // NNAPI CPU path. We'll enable that for tests. However, need to first check
+    // if the parameter is present - it will not be if the NNAPI delegate
+    // provider is not linked into the test.
+    if (delegate_providers->ConstParams().HasParam("disable_nnapi_cpu")) {
+      delegate_providers->MutableParams()->Set("disable_nnapi_cpu", false);
+    }
     for (auto& one : delegate_providers->CreateAllDelegates()) {
       // The raw ptr always points to the actual TfLiteDegate object.
-      auto* delegate_raw_ptr = one.get();
-      TF_LITE_ENSURE_STATUS(
-          interpreter_->ModifyGraphWithDelegate(std::move(one)));
+      auto* delegate_raw_ptr = one.delegate.get();
+      SetDelegateApplicationStatus(
+          interpreter_->ModifyGraphWithDelegate(std::move(one.delegate)));
+      TF_LITE_ENSURE_STATUS(*GetDelegateApplicationStatus());
       // Note: 'delegate_' is always set to the last successfully applied one.
       delegate_ = delegate_raw_ptr;
       ++num_applied_delegates_;
@@ -228,15 +305,14 @@ TfLiteStatus SingleOpModel::ApplyDelegate() {
   return kTfLiteOk;
 }
 
-void SingleOpModel::Invoke() { ASSERT_EQ(interpreter_->Invoke(), kTfLiteOk); }
+TfLiteStatus SingleOpModel::Invoke() { return interpreter_->Invoke(); }
 
-TfLiteStatus SingleOpModel::InvokeUnchecked() { return interpreter_->Invoke(); }
-
-void SingleOpModel::BuildInterpreter(
-    std::vector<std::vector<int>> input_shapes) {
+void SingleOpModel::BuildInterpreter(std::vector<std::vector<int>> input_shapes,
+                                     bool use_simple_allocator) {
   BuildInterpreter(input_shapes, /*num_threads=*/-1,
                    /*allow_fp32_relax_to_fp16=*/false,
-                   /*apply_delegate=*/true, /*allocate_and_delegate=*/true);
+                   /*apply_delegate=*/true, /*allocate_and_delegate=*/true,
+                   use_simple_allocator);
 }
 
 // static
@@ -320,8 +396,24 @@ int CountPartitionsExecutedByCpuKernel(const Interpreter* interpreter) {
 
 }  // namespace
 
+/*static*/ AccelerationValidator* AccelerationValidator::Get() {
+  static AccelerationValidator* const validator = new AccelerationValidator();
+  return validator;
+}
+
+void AccelerationValidator::AddCallback(Callback callback) {
+  callbacks_.push_back(std::move(callback));
+}
+
+void AccelerationValidator::Validate(const SingleOpModel& model) const {
+  for (const auto& callback : callbacks_) {
+    if (callback == nullptr) continue;
+    callback(model);
+  }
+}
+
 void SingleOpModel::ExpectOpAcceleratedWithNnapi(const std::string& test_id) {
-  absl::optional<NnapiAccelerationTestParams> validation_params =
+  std::optional<NnapiAccelerationTestParams> validation_params =
       GetNnapiAccelerationTestParam(test_id);
   if (!validation_params.has_value()) {
     return;
@@ -343,6 +435,7 @@ void SingleOpModel::ExpectOpAcceleratedWithNnapi(const std::string& test_id) {
     EXPECT_EQ(CountPartitionsDelegatedTo(interpreter_.get(), delegate_), 1)
         << "Expecting operation to be accelerated but cannot find a partition "
            "associated to the NNAPI delegate";
+    EXPECT_GT(num_applied_delegates_, 0) << "No delegates were applied.";
   }
 }
 
@@ -350,10 +443,15 @@ void SingleOpModel::ValidateAcceleration() {
   if (GetForceUseNnapi()) {
     ExpectOpAcceleratedWithNnapi(GetCurrentTestId());
   }
+  AccelerationValidator::Get()->Validate(*this);
 }
 
 int SingleOpModel::CountOpsExecutedByCpuKernel() {
   return CountPartitionsExecutedByCpuKernel(interpreter_.get());
+}
+
+int SingleOpModel::CountNumberOfDelegatedPartitions() const {
+  return CountPartitionsDelegatedTo(interpreter_.get(), delegate_);
 }
 
 SingleOpModel::~SingleOpModel() { ValidateAcceleration(); }

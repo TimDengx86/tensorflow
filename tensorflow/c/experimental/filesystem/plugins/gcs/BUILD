@@ -1,8 +1,10 @@
 # Experimental gcs filesystem plugin.
 load("//tensorflow:tensorflow.bzl", "get_win_copts", "tf_cc_shared_object", "tf_cc_test")
+load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
 
 package(
-    licenses = ["notice"],  # Apache 2.0
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
+    licenses = ["notice"],
 )
 
 # Filesystem implementation for GCS environments
@@ -94,6 +96,7 @@ tf_cc_test(
     deps = [
         ":gcs_filesystem_impl",
         "//tensorflow/c:tf_status_helper",
+        "//tensorflow/core/platform:path",
         "//tensorflow/core/platform:stacktrace_handler",
         "//tensorflow/core/platform:test",
         "@com_google_absl//absl/strings",

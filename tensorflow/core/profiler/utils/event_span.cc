@@ -20,13 +20,12 @@ limitations under the License.
 
 #include "absl/algorithm/container.h"
 #include "absl/container/flat_hash_map.h"
-#include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "tensorflow/core/lib/gtl/map_util.h"
 #include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/profiler/protobuf/op_metrics.pb.h"
-#include "tensorflow/core/profiler/utils/timespan.h"
+#include "tsl/profiler/utils/timespan.h"
 
 namespace tensorflow {
 namespace profiler {
@@ -82,7 +81,7 @@ class PriorityTracker {
   // The current maximum priority.
   EventType current_max_priority_;
   // A count for each possible priority.
-  std::vector<int64> priority_count_;
+  std::vector<int64_t> priority_count_;
 
  public:
   PriorityTracker() {
@@ -120,80 +119,33 @@ class PriorityTracker {
   }
 };
 
-std::vector<EventTypeSpan> ToNonOverlappedEvents(
-    const std::vector<EventTypeSpan>& overlapped_events) {
-  std::vector<EventBoundary> event_boundaries =
-      GenerateEventBoundaries(overlapped_events);
-  std::vector<EventTypeSpan> result;
-  if (event_boundaries.empty()) return result;
-  result.reserve(event_boundaries.size());
-  PriorityTracker priority_tracker;
-  for (int64 i = 0, end = (event_boundaries.size() - 1); i < end; i++) {
-    EventType highest_priority = priority_tracker.Update(event_boundaries[i]);
-    result.push_back({highest_priority, Timespan::FromEndPoints(
-                                            event_boundaries[i].time_ps,
-                                            event_boundaries[i + 1].time_ps)});
-  }
-  return result;
-}
+constexpr int kNumGenericEventTypes = GenericEventType::kLastGenericEventType -
+                                      GenericEventType::kFirstGenericEventType +
+                                      1;
 
-void CombineStepDetails(const StepDetails& src, StepDetails* dst) {
-  dst->AppendMarkers(src.Markers());
-  dst->AppendEvents(src.Events());
-  dst->AppendCollectives(src.Collectives());
-  dst->AggregateDeviceMemoryTransfers(src.DeviceMemoryTransfers());
-}
+using GenericEventTypeStrMap =
+    absl::flat_hash_map<GenericEventType, absl::string_view>;
 
-EventType ClassifyDeviceCompute(absl::string_view event_name,
-                                absl::string_view tensor_shapes) {
-  if (tensor_shapes.empty()) {
-    // Deduces the precision from the name.
-    if (absl::StrContains(event_name, "half") ||
-        absl::StrContains(event_name, "fp16"))
-      return DEVICE_COMPUTE_16;
-    else
-      return DEVICE_COMPUTE_32;
-  } else {
-    // Deduces the precision from the shapes.
-    if (absl::StrContains(tensor_shapes, "half"))
-      return DEVICE_COMPUTE_16;
-    else
-      return DEVICE_COMPUTE_32;
-  }
+const GenericEventTypeStrMap& GetGenericEventTypeStrMap() {
+  static const auto* generic_event_type_str_map = new GenericEventTypeStrMap({
+      {kDeviceCompute, "Device compute"},
+      {kDeviceToDevice, "Device to device"},
+      {kDeviceCollectives, "Device collective communication"},
+      {kHostCompute, "Host compute"},
+      {kHostPrepare, "Kernel launch"},
+      {kInput, "Input"},
+      {kOutput, "Output"},
+      {kCompile, "Compilation"},
+      {kAllOthers, "All others"},
+  });
+  DCHECK_EQ(generic_event_type_str_map->size(), kNumGenericEventTypes);
+  return *generic_event_type_str_map;
 }
 
 }  // namespace
 
-EventType ClassifyGpuEvent(absl::string_view event_name,
-                           absl::string_view tensor_shapes) {
-  if (absl::StartsWithIgnoreCase(event_name, "MEMCPYHtoD"))
-    return HOST_TO_DEVICE;
-  if (absl::StartsWithIgnoreCase(event_name, "MEMCPYDtoH"))
-    return DEVICE_TO_HOST;
-  if (absl::StartsWithIgnoreCase(event_name, "MEMCPYDtoD"))
-    return DEVICE_TO_DEVICE;
-  if (absl::StartsWithIgnoreCase(event_name, "nccl")) {
-    return DEVICE_COLLECTIVES;
-  }
-  return ClassifyDeviceCompute(event_name, tensor_shapes);
-}
-
-EventType ClassifyCpuEvent(absl::string_view event_name, int64 correlation_id,
-                           bool has_device) {
-  if (absl::StartsWithIgnoreCase(event_name, "MEMCPYHtoD") ||
-      absl::StrContains(event_name, "Infeed"))
-    return HOST_TO_DEVICE;
-  if (absl::StartsWithIgnoreCase(event_name, "MEMCPYHtoH")) return HOST_TO_HOST;
-  // TODO(b/150420972): Separate runtime overhead from actual compute for
-  // CPU-only.
-  if (has_device &&
-      (correlation_id >= 0 ||
-       absl::StartsWithIgnoreCase(event_name, "ExecutorState::Process"))) {
-    return HOST_PREPARE;
-  }
-  if (absl::StartsWithIgnoreCase(event_name, "IteratorGetNext"))
-    return HOST_WAIT_INPUT;
-  return HOST_COMPUTE;
+absl::string_view GetGenericEventTypeStr(GenericEventType event_type) {
+  return GetGenericEventTypeStrMap().at(event_type);
 }
 
 std::string PrintEventType(EventType event_type) {
@@ -210,6 +162,8 @@ std::string PrintEventType(EventType event_type) {
       return "host_to_device";
     case HOST_PREPARE:
       return "host_prepare";
+    case DEVICE_COLLECTIVES:
+      return "device_collectives";
     case HOST_WAIT_INPUT:
       return "host_wait_input";
     case DEVICE_TO_DEVICE:
@@ -252,7 +206,7 @@ std::string PrintStepMarker(const StepMarker& step_marker) {
 }
 
 std::string PrintStepEvents(const StepEvents& step_events) {
-  std::vector<int64> step_ids;
+  std::vector<int64_t> step_ids;
   step_ids.reserve(step_events.size());
   for (const auto& id_details : step_events) {
     step_ids.push_back(id_details.first);
@@ -268,13 +222,48 @@ std::string PrintStepEvents(const StepEvents& step_events) {
   return absl::StrCat(result, "\n}");
 }
 
-void CombineStepEvents(const StepEvents& src, StepEvents* dst) {
+void UnionCombineStepEvents(const StepEvents& src, StepEvents* dst) {
   for (const auto& step_details : src) {
-    int64 step_id = step_details.first;
+    int64_t step_id = step_details.first;
     const StepDetails& src_details = step_details.second;
     StepDetails* dst_details = &(*dst)[step_id];
-    CombineStepDetails(src_details, dst_details);
+    dst_details->Combine(src_details);
   }
+}
+
+void IntersectCombineStepEvents(const StepEvents& src, StepEvents* dst) {
+  if (dst->empty()) {
+    *dst = src;
+    return;
+  }
+  auto iter = dst->begin();
+  while (iter != dst->end()) {
+    if (!src.contains(iter->first)) {
+      // This is safe because the post-increment is sequenced after the full
+      // expression that contains it.
+      dst->erase(iter++);
+    } else {
+      iter->second.Combine(src.at(iter->first));
+      iter++;
+    }
+  }
+}
+
+std::vector<EventTypeSpan> ToNonOverlappedEvents(
+    const std::vector<EventTypeSpan>& overlapped_events) {
+  std::vector<EventBoundary> event_boundaries =
+      GenerateEventBoundaries(overlapped_events);
+  std::vector<EventTypeSpan> result;
+  if (event_boundaries.empty()) return result;
+  result.reserve(event_boundaries.size());
+  PriorityTracker priority_tracker;
+  for (int64_t i = 0, end = (event_boundaries.size() - 1); i < end; i++) {
+    EventType highest_priority = priority_tracker.Update(event_boundaries[i]);
+    result.push_back({highest_priority, tsl::profiler::Timespan::FromEndPoints(
+                                            event_boundaries[i].time_ps,
+                                            event_boundaries[i + 1].time_ps)});
+  }
+  return result;
 }
 
 // Converts from overlapped step-events to non-overlapped step-events.
@@ -283,14 +272,8 @@ StepEvents ToNonOverlappedStepEvents(const StepEvents& overlapped_step_events) {
   for (const auto& step_events : overlapped_step_events) {
     const auto& step_id = step_events.first;
     const auto& step_details = step_events.second;
-    *non_overlapped_step_events[step_id].MutableMarkers() =
-        step_details.Markers();
-    *non_overlapped_step_events[step_id].MutableEvents() =
-        ToNonOverlappedEvents(step_details.Events());
-    *non_overlapped_step_events[step_id].MutableCollectives() =
-        step_details.Collectives();
-    *non_overlapped_step_events[step_id].MutableDeviceMemoryTransfers() =
-        step_details.DeviceMemoryTransfers();
+    non_overlapped_step_events.try_emplace(step_id,
+                                           step_details.ToNonOverlapped());
   }
   return non_overlapped_step_events;
 }
@@ -298,21 +281,6 @@ StepEvents ToNonOverlappedStepEvents(const StepEvents& overlapped_step_events) {
 void StepDetails::AddMarker(const StepMarker& m) { markers_.push_back(m); }
 
 void StepDetails::AddEvent(const EventTypeSpan& e) { events_.push_back(e); }
-
-void StepDetails::AppendMarkers(const std::vector<StepMarker>& other_markers) {
-  markers_.insert(markers_.end(), other_markers.begin(), other_markers.end());
-}
-
-void StepDetails::AppendEvents(const std::vector<EventTypeSpan>& other_events) {
-  events_.insert(events_.end(), other_events.begin(), other_events.end());
-}
-
-void StepDetails::AppendCollectives(
-    const absl::flat_hash_map<uint32, AllReduceDbResult>& collectives) {
-  for (const auto& it : collectives) {
-    collectives_[it.first] = it.second;
-  }
-}
 
 void StepDetails::AggregateDeviceMemoryTransfers(
     const std::vector<DeviceMemoryTransfer> device_memory_transfers) {
@@ -336,9 +304,9 @@ void StepDetails::AddCollectiveOpEvent(uint64 core_id, const AllReduceInfo& e) {
   *collectives_[core_id].add_all_reduce_info() = e;
 }
 
-void StepDetails::AddDeviceMemoryTransferEvent(EventType event_type,
-                                               const Timespan& time_span,
-                                               uint64 bytes) {
+void StepDetails::AddDeviceMemoryTransferEvent(
+    EventType event_type, const tsl::profiler::Timespan& time_span,
+    uint64 bytes) {
   int index = 0;
   switch (event_type) {
     case HOST_TO_DEVICE:
@@ -362,14 +330,14 @@ void StepDetails::AddDeviceMemoryTransferEvent(EventType event_type,
       device_memory_transfers_[index].bytes_transferred() + bytes);
 }
 
-Timespan StepDetails::StepTime() const {
-  Timespan max_host_step_time;
-  Timespan max_device_step_time;
+tsl::profiler::Timespan StepDetails::StepTime() const {
+  tsl::profiler::Timespan max_host_step_time;
+  tsl::profiler::Timespan max_device_step_time;
   for (const auto& marker : markers_) {
-    Timespan& cur_max_step_time =
+    tsl::profiler::Timespan& cur_max_step_time =
         marker.type == StepMarkerType::kDeviceStepMarker ? max_device_step_time
                                                          : max_host_step_time;
-    const Timespan& new_step_time = marker.span;
+    const tsl::profiler::Timespan& new_step_time = marker.span;
     if (new_step_time.duration_ps() > cur_max_step_time.duration_ps())
       cur_max_step_time = new_step_time;
   }
@@ -385,6 +353,29 @@ Timespan StepDetails::StepTime() const {
     return max_host_step_time;
   }
   return max_device_step_time;
+}
+
+StepDetails StepDetails::ToNonOverlapped() const {
+  StepDetails non_overlapped_step_details;
+  non_overlapped_step_details.markers_ = markers_;
+  non_overlapped_step_details.events_ = ToNonOverlappedEvents(events_);
+  non_overlapped_step_details.collectives_ = collectives_;
+  non_overlapped_step_details.device_memory_transfers_ =
+      device_memory_transfers_;
+  non_overlapped_step_details.step_name_ = step_name_;
+  non_overlapped_step_details.per_core_op_metrics_db_ = per_core_op_metrics_db_;
+  return non_overlapped_step_details;
+}
+
+void StepDetails::Combine(const StepDetails& other) {
+  markers_.insert(markers_.end(), other.markers_.begin(), other.markers_.end());
+  events_.insert(events_.end(), other.events_.begin(), other.events_.end());
+  collectives_.insert(other.collectives_.begin(), other.collectives_.end());
+  AggregateDeviceMemoryTransfers(other.device_memory_transfers_);
+  for (const auto& [core_id, op_metric_db] : other.per_core_op_metrics_db_) {
+    per_core_op_metrics_db_[core_id] = op_metric_db;
+  }
+  if (step_name_.empty()) step_name_ = other.step_name_;
 }
 
 std::string StepDetails::DebugString() const {
@@ -429,8 +420,8 @@ bool operator==(const StepEvents& a, const StepEvents& b) {
 
 PrecisionStats ComputePrecisionStats(
     const StepEvents& nonoverlapped_step_events) {
-  int64 compute_32bit_ps = 0;
-  int64 compute_16bit_ps = 0;
+  int64_t compute_32bit_ps = 0;
+  int64_t compute_16bit_ps = 0;
   for (const auto& id_details : nonoverlapped_step_events) {
     for (const auto& event : id_details.second.Events()) {
       switch (event.type) {

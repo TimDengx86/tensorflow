@@ -21,7 +21,7 @@ limitations under the License.
 #include <algorithm>
 #include <cmath>
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
@@ -36,9 +36,6 @@ namespace tensorflow {
 
 typedef Eigen::ThreadPoolDevice CPUDevice;
 typedef Eigen::GpuDevice GPUDevice;
-#ifdef TENSORFLOW_USE_SYCL
-typedef Eigen::SyclDevice SYCLDevice;
-#endif
 
 template <typename Device, typename T>
 class RGBToHSVOp : public OpKernel {
@@ -119,6 +116,8 @@ class HSVToRGBOp : public OpKernel {
   template class HSVToRGBOp<CPUDevice, T>;
 TF_CALL_float(REGISTER_CPU);
 TF_CALL_double(REGISTER_CPU);
+TF_CALL_half(REGISTER_CPU);
+TF_CALL_bfloat16(REGISTER_CPU);
 
 #if (defined(GOOGLE_CUDA) && GOOGLE_CUDA) || \
     (defined(TENSORFLOW_USE_ROCM) && TENSORFLOW_USE_ROCM)
@@ -148,18 +147,6 @@ TF_CALL_double(DECLARE_GPU);
       HSVToRGBOp<GPUDevice, T>);
 TF_CALL_float(REGISTER_GPU);
 TF_CALL_double(REGISTER_GPU);
-#endif
-
-#ifdef TENSORFLOW_USE_SYCL
-#define REGISTER_SYCL(T)                                           \
-  REGISTER_KERNEL_BUILDER(                                         \
-      Name("RGBToHSV").Device(DEVICE_SYCL).TypeConstraint<T>("T"), \
-      RGBToHSVOp<SYCLDevice, T>);                                  \
-  REGISTER_KERNEL_BUILDER(                                         \
-      Name("HSVToRGB").Device(DEVICE_SYCL).TypeConstraint<T>("T"), \
-      HSVToRGBOp<SYCLDevice, T>);
-TF_CALL_float(REGISTER_SYCL);
-TF_CALL_double(REGISTER_SYCL);
 #endif
 
 }  // namespace tensorflow

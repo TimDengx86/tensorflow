@@ -1,18 +1,19 @@
 # Description:
 # JavaScript/TypeScript code generation for TensorFlow.js
 
-visibility = [
-    "//tensorflow:internal",
-]
-
 load(
     "//tensorflow:tensorflow.bzl",
     "tf_cc_test",
 )
 
+visibility = [
+    "//tensorflow:internal",
+]
+
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = visibility,
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
 )
 
 cc_library(

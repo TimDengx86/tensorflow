@@ -17,6 +17,8 @@ limitations under the License.
 #include <stdlib.h>
 #include <string.h>
 
+#include <variant>
+
 #include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
 #include "absl/types/variant.h"
@@ -81,7 +83,7 @@ void ParseGCSPath(const std::string& fname, bool object_empty_ok,
     return;
   }
 
-  size_t bucket_end = fname.find("/", scheme_end + 1);
+  size_t bucket_end = fname.find('/', scheme_end + 1);
   if (bucket_end == std::string::npos) {
     TF_SetStatus(status, TF_INVALID_ARGUMENT,
                  "GCS path doesn't contain a bucket name.");
@@ -262,7 +264,8 @@ static void SyncImpl(const std::string& bucket, const std::string& object,
   if (*offset == -1 || *offset == 0) {
     // UploadFile will automatically switch to resumable upload based on Client
     // configuration.
-    auto metadata = gcs_client->UploadFile(outfile->getName(), bucket, object);
+    auto metadata = gcs_client->UploadFile(outfile->getName(), bucket, object,
+                                           gcs::Fields("size"));
     if (!metadata) {
       TF_SetStatusFromGCSStatus(metadata.status(), status);
       return;
@@ -281,8 +284,8 @@ static void SyncImpl(const std::string& bucket, const std::string& object,
   } else {
     std::string temporary_object =
         gcs::CreateRandomPrefixName("tf_writable_file_gcs");
-    auto metadata =
-        gcs_client->UploadFile(outfile->getName(), bucket, temporary_object);
+    auto metadata = gcs_client->UploadFile(outfile->getName(), bucket,
+                                           temporary_object, gcs::Fields(""));
     if (!metadata) {
       TF_SetStatusFromGCSStatus(metadata.status(), status);
       return;
@@ -291,7 +294,8 @@ static void SyncImpl(const std::string& bucket, const std::string& object,
             temporary_object.c_str(), bucket.c_str(), object.c_str());
     const std::vector<gcs::ComposeSourceObject> source_objects = {
         {object, {}, {}}, {temporary_object, {}, {}}};
-    metadata = gcs_client->ComposeObject(bucket, source_objects, object);
+    metadata = gcs_client->ComposeObject(bucket, source_objects, object,
+                                         gcs::Fields("size"));
     if (!metadata) {
       TF_SetStatusFromGCSStatus(metadata.status(), status);
       return;
@@ -435,13 +439,16 @@ GCSFile::GCSFile(google::cloud::storage::Client&& gcs_client)
 
   // Apply the overrides for the block size (MB), max bytes (MB), and max
   // staleness (seconds) if provided.
-  if (absl::SimpleAtoi(std::getenv(kBlockSize), &value)) {
+  const char* block_size_env = std::getenv(kBlockSize);
+  if (block_size_env && absl::SimpleAtoi(block_size_env, &value)) {
     block_size = value * 1024 * 1024;
   }
-  if (absl::SimpleAtoi(std::getenv(kMaxCacheSize), &value)) {
+  const char* max_bytes_env = std::getenv(kMaxCacheSize);
+  if (max_bytes_env && absl::SimpleAtoi(max_bytes_env, &value)) {
     max_bytes = static_cast<size_t>(value * 1024 * 1024);
   }
-  if (absl::SimpleAtoi(std::getenv(kMaxStaleness), &value)) {
+  const char* max_staleness_env = std::getenv(kMaxStaleness);
+  if (max_staleness_env && absl::SimpleAtoi(max_staleness_env, &value)) {
     max_staleness = value;
   }
   TF_VLog(1, "GCS cache max size = %u ; block size = %u ; max staleness = %u",
@@ -457,10 +464,14 @@ GCSFile::GCSFile(google::cloud::storage::Client&& gcs_client)
 
   uint64_t stat_cache_max_age = kStatCacheDefaultMaxAge;
   size_t stat_cache_max_entries = kStatCacheDefaultMaxEntries;
-  if (absl::SimpleAtoi(std::getenv(kStatCacheMaxAge), &value)) {
+  const char* stat_cache_max_age_env = std::getenv(kStatCacheMaxAge);
+  if (stat_cache_max_age_env &&
+      absl::SimpleAtoi(stat_cache_max_age_env, &value)) {
     stat_cache_max_age = value;
   }
-  if (absl::SimpleAtoi(std::getenv(kStatCacheMaxEntries), &value)) {
+  const char* stat_cache_max_entries_env = std::getenv(kStatCacheMaxEntries);
+  if (stat_cache_max_entries_env &&
+      absl::SimpleAtoi(stat_cache_max_entries_env, &value)) {
     stat_cache_max_entries = static_cast<size_t>(value);
   }
   stat_cache = std::make_unique<ExpiringLRUCache<GcsFileStat>>(
@@ -522,7 +533,8 @@ void Cleanup(TF_Filesystem* filesystem) {
 static void UncachedStatForObject(const std::string& bucket,
                                   const std::string& object, GcsFileStat* stat,
                                   gcs::Client* gcs_client, TF_Status* status) {
-  auto metadata = gcs_client->GetObjectMetadata(bucket, object);
+  auto metadata = gcs_client->GetObjectMetadata(
+      bucket, object, gcs::Fields("generation,size,timeStorageClassUpdated"));
   if (!metadata) return TF_SetStatusFromGCSStatus(metadata.status(), status);
   stat->generation_number = metadata->generation();
   stat->base.length = metadata->size();
@@ -632,7 +644,8 @@ void NewAppendableFile(const TF_Filesystem* filesystem, const char* path,
   } else {
     // If compose is true, we do not download anything.
     // Instead we only check if this file exists on server or not.
-    auto metadata = gcs_file->gcs_client.GetObjectMetadata(bucket, object);
+    auto metadata = gcs_file->gcs_client.GetObjectMetadata(bucket, object,
+                                                           gcs::Fields("size"));
     TF_SetStatusFromGCSStatus(metadata.status(), status);
     if (TF_GetCode(status) == TF_OK) {
       file->plugin_file = new tf_writable_file::GCSFile(
@@ -664,7 +677,8 @@ void NewReadOnlyMemoryRegionFromFile(const TF_Filesystem* filesystem,
   if (TF_GetCode(status) != TF_OK) return;
 
   auto gcs_file = static_cast<GCSFile*>(filesystem->plugin_filesystem);
-  auto metadata = gcs_file->gcs_client.GetObjectMetadata(bucket, object);
+  auto metadata = gcs_file->gcs_client.GetObjectMetadata(bucket, object,
+                                                         gcs::Fields("size"));
   if (!metadata) {
     TF_SetStatusFromGCSStatus(metadata.status(), status);
     return;
@@ -695,7 +709,8 @@ static void StatForObject(GCSFile* gcs_file, const std::string& path,
   if (object.empty())
     return TF_SetStatus(
         status, TF_INVALID_ARGUMENT,
-        ("'object' must be a non-empty string. (File: " + path + ")").c_str());
+        absl::StrCat("'object' must be a non-empty string. (File: ", path, ")")
+            .c_str());
   TF_SetStatus(status, TF_OK, "");
   gcs_file->stat_cache->LookupOrCompute(
       path, stat,
@@ -723,7 +738,8 @@ static bool ObjectExists(GCSFile* gcs_file, const std::string& path,
 
 static bool BucketExists(GCSFile* gcs_file, const std::string& bucket,
                          TF_Status* status) {
-  auto metadata = gcs_file->gcs_client.GetBucketMetadata(bucket);
+  auto metadata =
+      gcs_file->gcs_client.GetBucketMetadata(bucket, gcs::Fields(""));
   TF_SetStatusFromGCSStatus(metadata.status(), status);
   if (TF_GetCode(status) != TF_OK && TF_GetCode(status) != TF_NOT_FOUND)
     return false;
@@ -746,7 +762,8 @@ static std::vector<std::string> GetChildrenBounded(
   std::string delimiter = recursive ? "" : "/";
 
   for (auto&& item : gcs_file->gcs_client.ListObjectsAndPrefixes(
-           bucket, gcs::Prefix(prefix), gcs::Delimiter(delimiter))) {
+           bucket, gcs::Prefix(prefix), gcs::Delimiter(delimiter),
+           gcs::Fields("items(name),prefixes"))) {
     if (count == max_results) {
       TF_SetStatus(status, TF_OK, "");
       return result;
@@ -756,14 +773,14 @@ static std::vector<std::string> GetChildrenBounded(
       return result;
     }
     auto value = *std::move(item);
-    std::string children = absl::holds_alternative<std::string>(value)
-                               ? absl::get<std::string>(value)
-                               : absl::get<gcs::ObjectMetadata>(value).name();
+    std::string children = std::holds_alternative<std::string>(value)
+                               ? std::get<std::string>(value)
+                               : std::get<gcs::ObjectMetadata>(value).name();
     auto pos = children.find(prefix);
     if (pos != 0) {
       TF_SetStatus(status, TF_INTERNAL,
-                   ("Unexpected response: the returned file name " + children +
-                    " doesn't match the prefix " + prefix)
+                   absl::StrCat("Unexpected response: the returned file name ",
+                                children, " doesn't match the prefix ", prefix)
                        .c_str());
       return result;
     }
@@ -850,7 +867,8 @@ void CreateDir(const TF_Filesystem* filesystem, const char* path,
     if (TF_GetCode(status) != TF_OK) return;
     if (!is_directory)
       TF_SetStatus(status, TF_NOT_FOUND,
-                   ("The specified bucket " + dir + " was not found.").c_str());
+                   absl::StrCat("The specified bucket ", dir, " was not found.")
+                       .c_str());
     return;
   }
 
@@ -865,7 +883,7 @@ void CreateDir(const TF_Filesystem* filesystem, const char* path,
       bucket, object, "",
       // Adding this parameter means HTTP_CODE_PRECONDITION_FAILED
       // will be returned if the object already exists, so avoid reuploading.
-      gcs::IfGenerationMatch(0));
+      gcs::IfGenerationMatch(0), gcs::Fields(""));
   TF_SetStatusFromGCSStatus(metadata.status(), status);
   if (TF_GetCode(status) == TF_FAILED_PRECONDITION)
     TF_SetStatus(status, TF_ALREADY_EXISTS, path);
@@ -923,7 +941,8 @@ void CopyFile(const TF_Filesystem* filesystem, const char* src, const char* dst,
 
   auto gcs_file = static_cast<GCSFile*>(filesystem->plugin_filesystem);
   auto metadata = gcs_file->gcs_client.RewriteObjectBlocking(
-      bucket_src, object_src, bucket_dst, object_dst);
+      bucket_src, object_src, bucket_dst, object_dst,
+      gcs::Fields("done,rewriteToken"));
   TF_SetStatusFromGCSStatus(metadata.status(), status);
 }
 
@@ -940,7 +959,8 @@ bool IsDirectory(const TF_Filesystem* filesystem, const char* path,
     if (!result)
       TF_SetStatus(
           status, TF_NOT_FOUND,
-          ("The specified bucket gs://" + bucket + " was not found.").c_str());
+          absl::StrCat("The specified bucket gs://", bucket, " was not found.")
+              .c_str());
     return result;
   }
 
@@ -976,7 +996,8 @@ static void RenameObject(const TF_Filesystem* filesystem,
 
   auto gcs_file = static_cast<GCSFile*>(filesystem->plugin_filesystem);
   auto metadata = gcs_file->gcs_client.RewriteObjectBlocking(
-      bucket_src, object_src, bucket_dst, object_dst);
+      bucket_src, object_src, bucket_dst, object_dst,
+      gcs::Fields("done,rewriteToken"));
   TF_SetStatusFromGCSStatus(metadata.status(), status);
   if (TF_GetCode(status) != TF_OK) return;
   TF_VLog(3, "RenameObject: finished %s to %s", src.c_str(), dst.c_str());
@@ -1068,7 +1089,8 @@ void Stat(const TF_Filesystem* filesystem, const char* path,
 
   auto gcs_file = static_cast<GCSFile*>(filesystem->plugin_filesystem);
   if (object.empty()) {
-    auto bucket_metadata = gcs_file->gcs_client.GetBucketMetadata(bucket);
+    auto bucket_metadata =
+        gcs_file->gcs_client.GetBucketMetadata(bucket, gcs::Fields(""));
     TF_SetStatusFromGCSStatus(bucket_metadata.status(), status);
     if (TF_GetCode(status) == TF_OK) {
       stats->is_directory = true;
@@ -1084,7 +1106,8 @@ void Stat(const TF_Filesystem* filesystem, const char* path,
     return TF_SetStatus(status, TF_OK, "");
   }
   if (TF_GetCode(status) == TF_FAILED_PRECONDITION) {
-    auto metadata = gcs_file->gcs_client.GetObjectMetadata(bucket, object);
+    auto metadata = gcs_file->gcs_client.GetObjectMetadata(
+        bucket, object, gcs::Fields("size,timeStorageClassUpdated"));
     if (metadata) {
       stats->is_directory = false;
       stats->length = metadata.value().size();

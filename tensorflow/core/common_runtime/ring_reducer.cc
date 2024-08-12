@@ -67,9 +67,9 @@ void RingReducer::Run(StatusCallback done) {
 
   if (VLOG_IS_ON(1)) {
     string buf;
-    for (int r = 0; r < col_params_->instance.device_names.size(); ++r) {
+    for (int r = 0; r < col_params_->group.members.size(); ++r) {
       strings::StrAppend(&buf, "dev ", r, " : ",
-                         col_params_->instance.device_names[r], "\n");
+                         col_params_->group.members[r].device.name(), "\n");
     }
     for (int sd = 0;
          sd < col_params_->instance.impl_details.subdiv_permutations.size();
@@ -93,7 +93,8 @@ void RingReducer::Run(StatusCallback done) {
     // just wait here on the copy.
     Notification note;
     Status status;
-    profiler::TraceMe activity("MemCpyAsync", profiler::TraceMeLevel::kInfo);
+    tsl::profiler::TraceMe activity("MemCpyAsync",
+                                    tsl::profiler::TraceMeLevel::kInfo);
     CollectiveRemoteAccessLocal::MemCpyAsync(
         col_ctx_->op_ctx->op_device_context(),
         col_ctx_->op_ctx->op_device_context(), col_ctx_->device,
@@ -187,15 +188,15 @@ bool RingReducer::RunAsyncParts() {
       ready_queue.Enqueue(&rfv_[rf_index]);
     }
   }
-  const DeviceBase::GpuDeviceInfo* gpu_info =
-      col_ctx_->device->tensorflow_gpu_device_info();
+  const DeviceBase::AcceleratorDeviceInfo* gpu_info =
+      col_ctx_->device->tensorflow_accelerator_device_info();
   if (gpu_info) {
     // Wait for all currently queued events on the CPU compute stream to
     // complete before proceeding.  The previous InitRingField calls allocated
     // temp memory buffers that are not guaranteed to be valid (e.g. for RDMA
     // write) unless we do.
-    profiler::TraceMe activity("WaitForQueuedEvents",
-                               profiler::TraceMeLevel::kInfo);
+    tsl::profiler::TraceMe activity("WaitForQueuedEvents",
+                                    tsl::profiler::TraceMeLevel::kInfo);
     Notification note;
     Status s = gpu_info->default_context->ThenExecute(
         col_ctx_->device, gpu_info->stream, [&note]() { note.Notify(); });
@@ -215,7 +216,7 @@ bool RingReducer::RunAsyncParts() {
   std::atomic<bool> aborted(false);
 
   {
-    profiler::TraceMe activity("Loop", profiler::TraceMeLevel::kInfo);
+    tsl::profiler::TraceMe activity("Loop", tsl::profiler::TraceMeLevel::kInfo);
     // Loop until all RingFields have advanced to completion.
     while (field_done_count < rfv_.size()) {
       VLOG(4) << FieldState();
@@ -256,7 +257,7 @@ bool RingReducer::RunAsyncParts() {
               rf->action = RF_REDUCE;
               Status s = collective_util::ComputeBinOp(
                   col_ctx_->op_ctx, col_ctx_->op_params, col_ctx_->device,
-                  col_params_->merge_op.get(), &rf->chunk, &rf->tmp_chunk);
+                  col_params_->merge_op, &rf->chunk, &rf->tmp_chunk);
               if (!s.ok()) {
                 aborted = true;
                 StartAbort(s);
@@ -266,13 +267,12 @@ bool RingReducer::RunAsyncParts() {
             }
             break;
           case RF_REDUCE:
-            if (!rf->second_pass && col_params_->final_op.get() &&
-                rf->is_final) {
+            if (!rf->second_pass && col_params_->final_op && rf->is_final) {
               rf->action = RF_FINALIZE;
               group_size_tensor_ready_.WaitForNotification();
               Status s = collective_util::ComputeBinOp(
                   col_ctx_->op_ctx, col_ctx_->op_params, col_ctx_->device,
-                  col_params_->final_op.get(), &rf->chunk, &group_size_tensor_);
+                  col_params_->final_op, &rf->chunk, &group_size_tensor_);
               if (!s.ok()) {
                 aborted = true;
                 StartAbort(s);

@@ -23,9 +23,8 @@ limitations under the License.
 
 #define EIGEN_USE_THREADS
 
-#include "third_party/eigen3/Eigen/Core"
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
-
+#include "Eigen/Core"  // from @eigen_archive
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/numeric_op.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
@@ -41,9 +40,6 @@ namespace tensorflow {
 
 typedef Eigen::ThreadPoolDevice CPUDevice;
 typedef Eigen::GpuDevice GPUDevice;
-#ifdef TENSORFLOW_USE_SYCL
-typedef Eigen::SyclDevice SYCLDevice;
-#endif  // TENSORFLOW_USE_SYCL
 
 template <typename Device>
 struct Constants {
@@ -63,7 +59,6 @@ struct Constants {
   }
 };
 
-#if defined(EIGEN_HAS_INDEX_LIST)
 struct ConstantsBase {
   const Eigen::IndexList<Eigen::type2index<0>> kZero;
   const Eigen::IndexList<Eigen::type2index<1>> kOne;
@@ -71,11 +66,6 @@ struct ConstantsBase {
 };
 template <>
 struct Constants<CPUDevice> : ConstantsBase {};
-#ifdef TENSORFLOW_USE_SYCL
-template <>
-struct Constants<SYCLDevice> : ConstantsBase {};
-#endif  // TENSORFLOW_USE_SYCL
-#endif  // EIGEN_HAS_INDEX_LIST
 
 class ReductionHelper {
  public:
@@ -123,13 +113,15 @@ class ReductionHelper {
   TensorShape shuffled_shape();
 
   // Permutation of reduced dims needed to put reduction dimensions at the end
-  gtl::InlinedVector<int32, 8> permutation();
+  absl::InlinedVector<int32, 8> permutation();
 
  private:
   bool reduce_first_axis_;  // True if need to reduce the 0-th dimension.
-  gtl::InlinedVector<int64, 4> data_reshape_;  // Reshape data before reduction.
-  gtl::InlinedVector<int64, 4> out_shape_;     // The final output shape.
-  gtl::InlinedVector<int64, 4> out_reshape_;   // Reshape output for reduction.
+  absl::InlinedVector<int64_t, 4>
+      data_reshape_;                           // Reshape data before reduction.
+  absl::InlinedVector<int64_t, 4> out_shape_;  // The final output shape.
+  absl::InlinedVector<int64_t, 4>
+      out_reshape_;  // Reshape output for reduction.
 };
 
 // For operations where the output is a reduction function along some
@@ -234,8 +226,8 @@ class ReductionOp : public OpKernel {
                                                &shuffled, alloc_attr));
         OP_REQUIRES_OK(ctx, DoTranspose(d, data_reshaped, helper.permutation(),
                                         &shuffled));
-        const int64 unreduced = tmp_out.NumElements();
-        const int64 reduced = shuffled.NumElements() / unreduced;
+        const int64_t unreduced = tmp_out.NumElements();
+        const int64_t reduced = shuffled.NumElements() / unreduced;
         const Tensor& const_shuffled = shuffled;
         Functor::Reduce(ctx, tmp_out.flat<T>(),
                         const_shuffled.shaped<T, 2>({unreduced, reduced}),
@@ -279,11 +271,6 @@ struct ReduceFunctorBase {
 template <typename Reducer>
 struct ReduceFunctor<CPUDevice, Reducer>
     : ReduceFunctorBase<CPUDevice, Reducer> {};
-#if TENSORFLOW_USE_SYCL
-template <typename Reducer>
-struct ReduceFunctor<SYCLDevice, Reducer>
-    : ReduceFunctorBase<SYCLDevice, Reducer> {};
-#endif  // TENSORFLOW_USE_SYCL
 
 }  // namespace functor
 }  // namespace tensorflow

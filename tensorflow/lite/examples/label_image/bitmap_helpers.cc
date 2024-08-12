@@ -13,17 +13,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include "tensorflow/lite/examples/label_image/bitmap_helpers.h"
+
+#include <unistd.h>  // NOLINT(build/include_order)
+
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <string>
 
-#include <unistd.h>  // NOLINT(build/include_order)
-
-#include "tensorflow/lite/examples/label_image/bitmap_helpers.h"
-
-#define LOG(x) std::cerr
+#include "tensorflow/lite/examples/label_image/label_image.h"
+#include "tensorflow/lite/examples/label_image/log.h"
+#include "tsl/platform/ctstring_internal.h"
 
 namespace tflite {
 namespace label_image {
@@ -76,7 +79,7 @@ std::vector<uint8_t> read_bmp(const std::string& input_bmp_name, int* width,
 
   std::ifstream file(input_bmp_name, std::ios::in | std::ios::binary);
   if (!file) {
-    LOG(FATAL) << "input file " << input_bmp_name << " not found\n";
+    LOG(FATAL) << "input file " << input_bmp_name << " not found";
     exit(-1);
   }
 
@@ -85,22 +88,24 @@ std::vector<uint8_t> read_bmp(const std::string& input_bmp_name, int* width,
   end = file.tellg();
   size_t len = end - begin;
 
-  if (s->verbose) LOG(INFO) << "len: " << len << "\n";
+  if (s->verbose) LOG(INFO) << "len: " << len;
 
   std::vector<uint8_t> img_bytes(len);
   file.seekg(0, std::ios::beg);
   file.read(reinterpret_cast<char*>(img_bytes.data()), len);
   const int32_t header_size =
-      *(reinterpret_cast<const int32_t*>(img_bytes.data() + 10));
-  *width = *(reinterpret_cast<const int32_t*>(img_bytes.data() + 18));
-  *height = *(reinterpret_cast<const int32_t*>(img_bytes.data() + 22));
+      TF_le32toh(*(reinterpret_cast<const int32_t*>(img_bytes.data() + 10)));
+  *width =
+      TF_le32toh(*(reinterpret_cast<const int32_t*>(img_bytes.data() + 18)));
+  *height =
+      TF_le32toh(*(reinterpret_cast<const int32_t*>(img_bytes.data() + 22)));
   const int32_t bpp =
-      *(reinterpret_cast<const int32_t*>(img_bytes.data() + 28));
+      TF_le32toh(*(reinterpret_cast<const int32_t*>(img_bytes.data() + 28)));
   *channels = bpp / 8;
 
   if (s->verbose)
     LOG(INFO) << "width, height, channels: " << *width << ", " << *height
-              << ", " << *channels << "\n";
+              << ", " << *channels;
 
   // there may be padding bytes when the width is not a multiple of 4 bytes
   // 8 * channels == bits per pixel

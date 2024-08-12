@@ -82,7 +82,7 @@ def TfSavedModel_Dialect : Dialect {
     with "get_global @some_global_tensor" in the function body.
   }];
 
-  let cppNamespace = "tf_saved_model";
+  let cppNamespace = "::mlir::tf_saved_model";
 }
 
 
@@ -90,7 +90,7 @@ def TfSavedModel_Dialect : Dialect {
 // Op definitions
 //===----------------------------------------------------------------------===//
 
-class TfSavedModel_Op<string mnemonic, list<OpTrait> traits = []> :
+class TfSavedModel_Op<string mnemonic, list<Trait> traits = []> :
     Op<TfSavedModel_Dialect, mnemonic, traits> {
 }
 
@@ -121,24 +121,24 @@ def TfSavedModel_GlobalTensorOp : TfSavedModel_Op<"global_tensor"> {
 
   let arguments = (ins
     StrAttr:$sym_name,
-    ElementsAttr:$value,
+    OptionalAttr<ElementsAttr>:$value,
     TypeAttr:$type,
     UnitAttr:$is_mutable
   );
 
-  let verifier = [{ return Verify(*this); }];
+  let hasVerifier = 1;
 }
 
 def TfSavedModel_SessionInitializerOp: TfSavedModel_Op<"session_initializer"> {
   let summary = "Initializes TensorFlow session state.";
   let description = [{
-    The session initializer op marks a function that must be called by an
-    external agent exactly once to initialize TensorFlow session state, and this
-    must happen before any other exported functions are called. There must be no
-    more than one session initializer in a saved model.
+    The session initializer op marks one or more functions that must be called
+    by an external agent exactly once to initialize TensorFlow session state,
+    and this must happen before any other exported functions are called. There
+    must be no more than one session initializer op in a saved model.
 
-    The `initializer` represents the initialization function. The function have
-    no output and this function should be only called once.
+    The `initializers` represents the initialization functions. The function
+    have no output and this function should be only called once.
 
     This is used, for example, to initialize hash tables stored in resources and
     accessed by resource name (rather than as resource handles or bound inputs
@@ -146,11 +146,11 @@ def TfSavedModel_SessionInitializerOp: TfSavedModel_Op<"session_initializer"> {
   }];
 
   let arguments = (ins
-    FlatSymbolRefAttr:$initializer
+    SymbolRefArrayAttr:$initializers
   );
 
 
-  let verifier = [{ return Verify(*this); }];
+  let hasVerifier = 1;
 
   let hasCanonicalizer = 1;
 }
@@ -160,7 +160,7 @@ def TfSavedModel_AssetOp: TfSavedModel_Op<"asset", [Symbol]> {
   let description = [{
     Represents an asset in the saved model that points to an external file. It
     is a scalar string tensor and it is passed as an argument to the session
-    initializer function.
+    initializer functions.
 
     The `sym_name` represents the symbol table name used for internal IR
     references.

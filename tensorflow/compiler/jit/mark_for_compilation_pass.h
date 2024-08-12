@@ -30,10 +30,6 @@ namespace tensorflow {
 // encapsulate subgraphs pass.
 extern const char* const kXlaClusterAttr;
 
-// The attribute that marks nodes in a cluster to be placed outside the xla
-// compilation by the encapsulate subgraphs pass.
-extern const char* const kXlaOutsideCompilationAttr;
-
 // Marks a subset of nodes in the graph which are to be clustered
 // with an attribute _XlaCluster=<cluster id> so they are picked up by the
 // EncapsulateSubgraphsPass.
@@ -45,18 +41,11 @@ class MarkForCompilationPass : public GraphOptimizationPass {
 
  private:
   Status RunForTest(const GraphOptimizationPassOptions& options,
-                    bool disable_deadness_analysis);
+                    bool disable_deadness_analysis,
+                    bool deterministic_cluster_names);
 
   friend class MarkForCompilationPassTestHelper;
 };
-
-// Returns true iff 'ndef' is a call to a function that is compilable.  A
-// function is compilable iff every operator in the function body is
-// compilable. If 'ndef' is not compilable and 'uncompilable_node_info' is not
-// null, we will populate 'uncompilable_node_info' with uncompilable node info.
-bool IsCompilable(FunctionLibraryRuntime* flr, const NodeDef& ndef,
-                  RecursiveCompilabilityChecker::UncompilableNodesMap*
-                      uncompilable_node_info = nullptr);
 
 absl::flat_hash_map<string, std::vector<string>>* GetAllowlistTable();
 

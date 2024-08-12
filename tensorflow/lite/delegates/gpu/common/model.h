@@ -17,9 +17,11 @@ limitations under the License.
 #define TENSORFLOW_LITE_DELEGATES_GPU_COMMON_MODEL_H_
 
 #include <algorithm>
+#include <any>
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -51,12 +53,12 @@ struct QuantizationParams {
 struct Value {
   const ValueId id;
   TensorRef<BHWC> tensor;
-  absl::optional<QuantizationParams> quant_params;
+  std::optional<QuantizationParams> quant_params;
 };
 
 struct Operation {
   std::string type;
-  absl::any attributes;
+  std::any attributes;
 };
 
 struct Node {
@@ -87,8 +89,12 @@ class GraphFloat32 {
   // @return graph inputs, that are values without producers.
   std::vector<Value*> inputs() const;
 
-  // @return graph outputs, that are values without consumers.
+  // @return graph outputs, that are values without consumers or values added by
+  // AddKnownGraphOutput.
   std::vector<Value*> outputs() const;
+
+  // @return values updated in place with a previously defined tensor reference.
+  std::vector<Value*> variable_inputs() const;
 
   // @return inputs into the given node. Returns empty vector for deleted node.
   std::vector<Value*> FindInputs(NodeId id) const;
@@ -112,6 +118,10 @@ class GraphFloat32 {
 
   // @return a value or nullptr if value with the given id is not present.
   Value* GetValue(ValueId id) const;
+
+  // Add a value to the list of known graph output list. The value should be
+  // gotten from delegate_params->output_tensors.
+  void AddKnownGraphOutput(Value* id) { known_graph_outputs_.push_back(id); }
 
   //////////////////////////////////////////////////////////////////////////////
   // Graph manipulation functions are below
@@ -220,6 +230,9 @@ class GraphFloat32 {
   std::map<NodeId, NodeDef> nodes_;
   // Node Ids in order of execution.
   std::vector<NodeId> execution_plan_;
+
+  // List of known graph outputs.
+  std::vector<Value*> known_graph_outputs_;
 };
 
 // Removes to_remove node that precedes to_keep node only if to_remove has
@@ -247,11 +260,16 @@ absl::Status RemoveSimpleNodeKeepOutput(GraphFloat32* graph,
 absl::Status AddOutput(GraphFloat32* graph, const Node* from_node,
                        Value** output);
 
+// Makes a direct connection between from_node and to_node. All input parameters
+// except output are expected to be initialized before passing to the function.
+// If from_node already has an output value, which is not yet consumed by
+// to_node, it may be passed as output parameter.
 absl::Status ConnectTwoNodes(GraphFloat32* graph, const Node* from_node,
                              const Node* to_node, Value** output);
 
-// @return true if all tensors have same batch value.
-bool IsBatchMatchesForAllValues(const GraphFloat32& model);
+// @return OkStatus if all tensors have the same batch value, otherwise an
+// invalid argument error is returned.
+absl::Status CheckBatchSizeForAllValues(const GraphFloat32& model);
 
 }  // namespace gpu
 }  // namespace tflite

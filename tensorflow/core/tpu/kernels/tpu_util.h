@@ -15,14 +15,16 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_TPU_KERNELS_TPU_UTIL_H_
 #define TENSORFLOW_CORE_TPU_KERNELS_TPU_UTIL_H_
 
+#include <memory>
 #include <string>
 #include <vector>
 
+#include "grpcpp/server_builder.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "tensorflow/cc/framework/ops.h"
 #include "tensorflow/compiler/tf2xla/xla_compiler.h"
-#include "tensorflow/compiler/xla/client/compile_only_client.h"
-#include "tensorflow/compiler/xla/statusor.h"
+#include "xla/client/compile_only_client.h"
 #include "tensorflow/core/protobuf/config.pb.h"
 #include "tensorflow/core/tpu/kernels/tpu_compilation_cache_key.h"
 
@@ -37,7 +39,7 @@ std::string SessionNameFromMetadata(const SessionMetadata* session_metadata);
 std::string ProtoKeyForComputation(const std::string& key, int core);
 
 // Returns a TpuCompilationCacheKey parsed from given key or an error.
-xla::StatusOr<TpuCompilationCacheKey> ParseCompilationCacheKey(
+absl::StatusOr<TpuCompilationCacheKey> ParseCompilationCacheKey(
     const std::string& key);
 
 xla::CompileOnlyClient::AotXlaComputationInstance
@@ -55,10 +57,9 @@ Status DynamicShapesToTensorShapes(const OpInputList& dynamic_shapes,
 Status DynamicShapesToTensorShapes(const InputList& dynamic_shapes,
                                    std::vector<TensorShape>* shapes);
 
-// We only recycle ports which were given to us by the portserver. For ports
-// we obtained through local trial-and-error, there is no reason to expect the
-// port to remain available after it is unbound.
-void RecycleUnusedPort(int port);
+// Creates gRPC ServerBuilder.
+absl::StatusOr<std::unique_ptr<::grpc::ServerBuilder>> CreateServerBuilder(
+    int serving_port);
 }  // namespace tpu
 }  // namespace tensorflow
 

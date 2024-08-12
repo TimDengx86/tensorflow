@@ -14,9 +14,15 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/core/tpu/kernels/tpu_compilation_cache_interface.h"
 
+#include <functional>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "xla/stream_executor/tpu/tpu_api.h"
 #include "tensorflow/core/platform/casts.h"
 #include "tensorflow/core/tpu/kernels/tpu_util.h"
-#include "tensorflow/core/tpu/tpu_api.h"
 
 namespace tensorflow {
 namespace tpu {
@@ -106,10 +112,11 @@ Status CompilationCacheEntryRef::ToSubEntryRef(
   // Otherwise, since the refcount is always on the main entry, we don't
   // need ref/unref.
   entry_ = target;
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-TpuCompilationCacheInterface::TpuCompilationCacheInterface(int64 max_cache_size)
+TpuCompilationCacheInterface::TpuCompilationCacheInterface(
+    int64_t max_cache_size)
     : max_cache_size_(max_cache_size) {
   CHECK_GE(max_cache_size_, 0);
   VLOG(1) << "Created compilation cache size " << max_cache_size_ << " bytes.";
@@ -123,7 +130,7 @@ TpuCompilationCacheInterface::~TpuCompilationCacheInterface() {
   for (const auto& entry : entries_by_uid_) {
     while (entry.second->external_references > 0) {
       Status s = Release(entry.first);
-      CHECK(s.ok());
+      TF_CHECK_OK(s);
     }
   }
   while (!entries_by_last_use_.empty()) {
@@ -139,8 +146,9 @@ TpuCompilationCacheInterface::~TpuCompilationCacheInterface() {
   CHECK_EQ(marked_for_eviction_size_, 0);
 }
 
-Status TpuCompilationCacheInterface::MarkEntryForEviction(int64 subgraph_uid) {
-  profiler::TraceMe key_release_traceme(
+Status TpuCompilationCacheInterface::MarkEntryForEviction(
+    int64_t subgraph_uid) {
+  tsl::profiler::TraceMe key_release_traceme(
       "TPU compilation cache possibly evict uid",
       /*level=*/2);
   CompiledSubgraph* deleted_entry = nullptr;
@@ -149,7 +157,7 @@ Status TpuCompilationCacheInterface::MarkEntryForEviction(int64 subgraph_uid) {
     auto iter = entries_by_uid_.find(subgraph_uid);
     if (iter == entries_by_uid_.end()) {
       // If already evicted, return ok.
-      return Status::OK();
+      return absl::OkStatus();
     }
 
     // Mark entry for eviction.
@@ -183,12 +191,13 @@ Status TpuCompilationCacheInterface::MarkEntryForEviction(int64 subgraph_uid) {
 
   // Unload from device cache if entry is evicted from host cache.
   UnloadAndDestroy(deleted_entry);
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status TpuCompilationCacheInterface::Release(int64 subgraph_uid) {
-  profiler::TraceMe key_release_traceme("TPU compilation cache release uid",
-                                        /*level=*/2);
+Status TpuCompilationCacheInterface::Release(int64_t subgraph_uid) {
+  tsl::profiler::TraceMe key_release_traceme(
+      "TPU compilation cache release uid",
+      /*level=*/2);
 
   CompiledSubgraph* deleted_entry = nullptr;
   {
@@ -212,7 +221,7 @@ Status TpuCompilationCacheInterface::Release(int64 subgraph_uid) {
             << marked_for_eviction_size_ << " bytes).";
   }
   UnloadAndDestroy(deleted_entry);
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 void TpuCompilationCacheInterface::UnloadAndDestroy(CompiledSubgraph* entry) {
@@ -228,9 +237,9 @@ size_t TpuCompilationCacheInterface::RemoveEntry(const std::string& key) {
   TpuCompilationMetrics::SetCacheEntryCount(cache_.size());
 
   auto parsed_key_or_status = ParseCompilationCacheKey(key);
-  CHECK(parsed_key_or_status.status().ok());
+  TF_CHECK_OK(parsed_key_or_status.status());
   const TpuCompilationCacheKey parsed_key =
-      parsed_key_or_status.ConsumeValueOrDie();
+      std::move(parsed_key_or_status).value();
   if (!parsed_key.has_guaranteed_const) {
     return erased;
   }
@@ -279,7 +288,7 @@ CompilationRefHolder* TpuCompilationCacheInterface::MakePerStepRefHolder() {
 }
 
 void TpuCompilationCacheInterface::DiscardEntryRefs(
-    gtl::ArraySlice<CompiledSubgraph*> entries) {
+    absl::Span<CompiledSubgraph* const> entries) {
   std::vector<CompiledSubgraph*> removed_entries;
   {
     absl::MutexLock lock(&mu_);
@@ -344,9 +353,9 @@ void TpuCompilationCacheInterface::InsertEntry(const std::string& key,
   TpuCompilationMetrics::SetCacheEntryCount(cache_.size());
 
   auto parsed_key_or_status = ParseCompilationCacheKey(key);
-  CHECK(parsed_key_or_status.status().ok());
+  TF_CHECK_OK(parsed_key_or_status.status());
   const TpuCompilationCacheKey parsed_key =
-      parsed_key_or_status.ConsumeValueOrDie();
+      std::move(parsed_key_or_status).value();
   if (!parsed_key.has_guaranteed_const) {
     return;
   }
@@ -361,15 +370,16 @@ void TpuCompilationCacheInterface::InsertEntry(const std::string& key,
 Status TpuCompilationCacheInterface::CompileIfKeyAbsent(
     const TpuCompilationCacheKey& subgraph_key,
     const SessionMetadata* session_metadata,
-    CompilationRefHolder* per_step_ref_holder, int64* uid,
-    std::vector<std::string>* proto_key,
+    CompilationRefHolder* per_step_ref_holder, int64_t* uid,
+    std::vector<std::string>* proto_key, std::vector<std::string>* sharding_key,
     std::vector<bool>* may_modify_variables,
     absl::Span<const xla::HloProto* const>* hlo_metadatas,
     const std::function<Status(TpuProgramGroupInterface*)>& compile_function) {
   std::vector<CompiledSubgraph*> removed_entries;
   auto status = CompileIfKeyAbsentHelper(
       subgraph_key, session_metadata, per_step_ref_holder, uid, proto_key,
-      may_modify_variables, &removed_entries, hlo_metadatas, compile_function);
+      sharding_key, may_modify_variables, &removed_entries, hlo_metadatas,
+      compile_function);
   for (auto entry : removed_entries) {
     UnloadAndDestroy(entry);
   }
@@ -388,7 +398,7 @@ std::string TpuCompilationCacheInterface::FindCacheKey(
   }
   iter = fingerprint_key_map_.find(strings::StrCat(
       subgraph_key.prefix, subgraph_key.guaranteed_const_fingerprint()));
-  if (iter != session_key_map_.end()) {
+  if (iter != fingerprint_key_map_.end()) {
     return iter->second;
   }
   VLOG(1) << "No matching cache key found for key " << subgraph_key.ToString();
@@ -398,15 +408,15 @@ std::string TpuCompilationCacheInterface::FindCacheKey(
 Status TpuCompilationCacheInterface::CompileIfKeyAbsentHelper(
     const TpuCompilationCacheKey& subgraph_key,
     const SessionMetadata* session_metadata,
-    CompilationRefHolder* per_step_ref_holder, int64* uid,
-    std::vector<std::string>* proto_key,
+    CompilationRefHolder* per_step_ref_holder, int64_t* uid,
+    std::vector<std::string>* proto_key, std::vector<std::string>* sharding_key,
     std::vector<bool>* may_modify_variables,
     std::vector<CompiledSubgraph*>* removed_entries,
     absl::Span<const xla::HloProto* const>* hlo_metadatas,
     const std::function<Status(TpuProgramGroupInterface*)>& compile_function) {
   CompiledSubgraph* entry = nullptr;
 
-  profiler::TraceMe subgraph_lookup_traceme(
+  tsl::profiler::TraceMe subgraph_lookup_traceme(
       "TPU compilation cache subgraph lookup",
       /*level=*/2);
 
@@ -433,7 +443,8 @@ Status TpuCompilationCacheInterface::CompileIfKeyAbsentHelper(
 
     // Check if caller has disabled compilation. Set using
     // internal::ScopedTpuCompileDisabler.
-    if (!UtilApiFn()->TpuCompile_IsTpuCompilationEnabledFn()) {
+    if (!stream_executor::tpu::OpsApiFn()
+             ->TpuCompile_IsTpuCompilationEnabledFn()) {
       const std::string error_msg = strings::StrCat(
           "[TpuCompilationDisabled]: Compilation cache miss, but compilation "
           "disabled, session_name(",
@@ -460,9 +471,11 @@ Status TpuCompilationCacheInterface::CompileIfKeyAbsentHelper(
             << marked_for_eviction_size_ << " bytes).";
     // Note that InitializeEntry() will Release/Reacquire mu_.
     entry = InitializeEntry(cache_key, compile_function, subgraph_key);
+    bool compilation_success = entry->tpu_program_group->program_count() > 0;
     TRACELITERAL("TPU host compilation cache: compilation done.");
     LOG(INFO) << strings::StrCat(
-        "TPU host compilation cache: compilation done for cache_key(",
+        "TPU host compilation cache: compilation ",
+        compilation_success ? "complete" : "failed", " for cache_key(",
         cache_key, "), session_name(", session_name, "), subgraph_key(",
         subgraph_key.debug_string, ")");
     // If session_name is present, log some additional stats related to HBM
@@ -497,6 +510,7 @@ Status TpuCompilationCacheInterface::CompileIfKeyAbsentHelper(
   *uid = entry->uid;
   // Let the caller know the keys for each of the cached protos.
   *proto_key = entry->proto_key;
+  *sharding_key = entry->sharding_key;
   *may_modify_variables = entry->tpu_program_group->may_modify_variables_list();
   *hlo_metadatas = entry->tpu_program_group->hlo_metadatas();
 
@@ -537,7 +551,7 @@ Status TpuCompilationCacheInterface::CompileIfKeyAbsentHelper(
 }
 
 Status TpuCompilationCacheInterface::GetKeysFromUid(
-    int64 uid, std::vector<std::string>* keys) {
+    int64_t uid, std::vector<std::string>* keys) {
   keys->clear();
 
   absl::MutexLock lock(&mu_);
@@ -546,15 +560,15 @@ Status TpuCompilationCacheInterface::GetKeysFromUid(
     return errors::NotFound("No subgraph found for uid ", uid);
   }
   *keys = iter->second->proto_key;
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 Status TpuCompilationCacheInterface::Lookup(
-    int64 uid, int proto_index,
+    int64_t uid, int proto_index,
     std::unique_ptr<CompilationCacheEntryRef>* entry) {
   entry->reset();
 
-  profiler::TraceMe proto_lookup_traceme(
+  tsl::profiler::TraceMe proto_lookup_traceme(
       "TPU compilation cache proto lookup by uid",
       /*level=*/2);
 
@@ -569,9 +583,9 @@ Status TpuCompilationCacheInterface::Lookup(
     return errors::NotFound("No proto found for core index ", proto_index,
                             " in subgraph with uid ", uid);
   }
-  *entry = absl::make_unique<CompilationCacheEntryRef>(this, cache_entry,
-                                                       proto_index);
-  return Status::OK();
+  *entry = std::make_unique<CompilationCacheEntryRef>(this, cache_entry,
+                                                      proto_index);
+  return absl::OkStatus();
 }
 
 Status TpuCompilationCacheInterface::Lookup(
@@ -579,8 +593,9 @@ Status TpuCompilationCacheInterface::Lookup(
     std::unique_ptr<CompilationCacheEntryRef>* entry) {
   entry->reset();
 
-  profiler::TraceMe proto_lookup_traceme("TPU compilation cache proto lookup",
-                                         /*level=*/2);
+  tsl::profiler::TraceMe proto_lookup_traceme(
+      "TPU compilation cache proto lookup",
+      /*level=*/2);
 
   absl::MutexLock lock(&mu_);
   const auto iter = entries_by_proto_key_.find(proto_key);
@@ -589,9 +604,9 @@ Status TpuCompilationCacheInterface::Lookup(
   }
   CompiledSubgraph* cache_entry = iter->second.first;
   int proto_index = iter->second.second;
-  *entry = absl::make_unique<CompilationCacheEntryRef>(this, cache_entry,
-                                                       proto_index);
-  return Status::OK();
+  *entry = std::make_unique<CompilationCacheEntryRef>(this, cache_entry,
+                                                      proto_index);
+  return absl::OkStatus();
 }
 }  // namespace tpu
 }  // namespace tensorflow

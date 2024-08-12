@@ -71,9 +71,9 @@ void RingGatherer::Run(StatusCallback done) {
 
   if (VLOG_IS_ON(1)) {
     string buf;
-    for (int r = 0; r < col_params_->instance.device_names.size(); ++r) {
+    for (int r = 0; r < col_params_->group.members.size(); ++r) {
       strings::StrAppend(&buf, "dev ", r, " : ",
-                         col_params_->instance.device_names[r], "\n");
+                         col_params_->group.members[r].device.name(), "\n");
     }
     for (int sd = 0;
          sd < col_params_->instance.impl_details.subdiv_permutations.size();
@@ -99,7 +99,8 @@ void RingGatherer::Run(StatusCallback done) {
   // We are running in a blockable thread and the callback can't block so
   // just wait here on the copy.
   {
-    profiler::TraceMe activity("MemCpyAsync", profiler::TraceMeLevel::kInfo);
+    tsl::profiler::TraceMe activity("MemCpyAsync",
+                                    tsl::profiler::TraceMeLevel::kInfo);
     Notification note;
     Status status;
     Tensor alias_chunk(ca_->ChunkAlias(col_params_->subdiv_rank[0]));
@@ -137,15 +138,15 @@ bool RingGatherer::RunAsyncParts() {
       ready_queue.Enqueue(&rfv_[rf_index]);
     }
   }
-  const DeviceBase::GpuDeviceInfo* gpu_info =
-      col_ctx_->device->tensorflow_gpu_device_info();
+  const DeviceBase::AcceleratorDeviceInfo* gpu_info =
+      col_ctx_->device->tensorflow_accelerator_device_info();
   if (gpu_info) {
     // Wait for all currently queued events on the CPU compute stream to
     // complete before proceeding.  The previous InitRingField calls allocated
     // temp memory buffers that are not guaranteed to be valid (e.g. for RDMA
     // write) unless we do.
-    profiler::TraceMe activity("WaitForQueuedEvents",
-                               profiler::TraceMeLevel::kInfo);
+    tsl::profiler::TraceMe activity("WaitForQueuedEvents",
+                                    tsl::profiler::TraceMeLevel::kInfo);
     Notification note;
     Status s = gpu_info->default_context->ThenExecute(
         col_ctx_->device, gpu_info->stream, [&note]() { note.Notify(); });
@@ -166,7 +167,7 @@ bool RingGatherer::RunAsyncParts() {
 
   // Loop until all RingFields have advanced to completion.
   {
-    profiler::TraceMe activity("Loop", profiler::TraceMeLevel::kInfo);
+    tsl::profiler::TraceMe activity("Loop", tsl::profiler::TraceMeLevel::kInfo);
     while (field_done_count < rfv_.size()) {
       VLOG(4) << FieldState();
       // Wait for a RingField to appear in the ready_queue.

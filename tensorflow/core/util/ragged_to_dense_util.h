@@ -13,23 +13,18 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#ifndef TENSORFLOW_CORE_OPS_RAGGED_TO_DENSE_UTIL_H_
-#define TENSORFLOW_CORE_OPS_RAGGED_TO_DENSE_UTIL_H_
+#ifndef TENSORFLOW_CORE_UTIL_RAGGED_TO_DENSE_UTIL_H_
+#define TENSORFLOW_CORE_UTIL_RAGGED_TO_DENSE_UTIL_H_
+
+#include <vector>
 
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/shape_inference.h"
 #include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/tensor_shape.pb.h"
+#include "tensorflow/core/util/ragged_to_dense_util_common.h"
 
 namespace tensorflow {
-enum class RowPartitionType {
-  FIRST_DIM_SIZE,
-  VALUE_ROWIDS,
-  ROW_LENGTHS,
-  ROW_SPLITS,
-  ROW_LIMITS,
-  ROW_STARTS
-};
 
 string RowPartitionTypeToString(RowPartitionType row_partition_type);
 
@@ -48,6 +43,10 @@ Status GetRowPartitionTypes(
                                     row_partition_types);
 }
 
+Status GetRowPartitionTypesHelper(
+    const std::vector<string>& row_partition_type_strings,
+    std::vector<RowPartitionType>* row_partition_types);
+
 Status CombineRaggedTensorToTensorShapes(int ragged_rank,
                                          const TensorShapeProto& shape,
                                          const TensorShapeProto& value_shape,
@@ -60,4 +59,4 @@ Status ValidateDefaultValueShape(const TensorShapeProto& default_value_shape,
 
 }  // namespace tensorflow
 
-#endif  // TENSORFLOW_CORE_OPS_RAGGED_TO_DENSE_UTIL_H_
+#endif  // TENSORFLOW_CORE_UTIL_RAGGED_TO_DENSE_UTIL_H_

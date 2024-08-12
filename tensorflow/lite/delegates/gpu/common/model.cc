@@ -46,8 +46,34 @@ std::vector<Value*> GraphFloat32::inputs() const {
   return FilterValues([](const ValueDef& v) { return v.producer == nullptr; });
 }
 
+std::vector<Value*> GraphFloat32::variable_inputs() const {
+  return FilterValues(
+      [](const ValueDef& v) { return v.value->tensor.is_variable_input; });
+}
+
 std::vector<Value*> GraphFloat32::outputs() const {
-  return FilterValues([](const ValueDef& v) { return v.consumers.empty(); });
+  std::vector<Value*> values;
+  std::vector<Value*> values_known_graph_outputs;
+  values.reserve(values_.size());
+  values_known_graph_outputs.reserve(values_.size());
+  for (auto& v : values_) {
+    auto value_ptr = v.value.get();
+    if (value_ptr == nullptr) continue;
+    // Find v which meets one of the following conditions.
+    // 1. v doesn't have a consumer.
+    // 2. v has a consumer but it's also in known_graph_outputs_.
+    if (v.consumers.empty()) {
+      values.push_back(v.value.get());
+    } else if (std::find(known_graph_outputs_.begin(),
+                         known_graph_outputs_.end(),
+                         value_ptr) != known_graph_outputs_.end()) {
+      values_known_graph_outputs.push_back(v.value.get());
+    }
+  }
+  // Add known_graph_outputs later to provide compatibility in output ordering.
+  values.insert(values.end(), values_known_graph_outputs.begin(),
+                values_known_graph_outputs.end());
+  return values;
 }
 
 std::vector<Value*> GraphFloat32::FindInputs(NodeId id) const {
@@ -74,6 +100,10 @@ bool GraphFloat32::IsGraphInput(ValueId id) const {
 bool GraphFloat32::IsGraphOutput(ValueId id) const {
   if (id >= values_.size()) {
     return false;
+  }
+  if (std::find(known_graph_outputs_.begin(), known_graph_outputs_.end(),
+                values_[id].value.get()) != known_graph_outputs_.end()) {
+    return true;
   }
   return values_[id].consumers.empty();
 }
@@ -109,7 +139,7 @@ Value* GraphFloat32::GetValue(ValueId id) const {
 Node* GraphFloat32::NewNode() {
   const NodeId new_id = nodes_.size();
   NodeDef def;
-  def.node = absl::make_unique<Node>(Node{static_cast<NodeId>(new_id), {}});
+  def.node = std::make_unique<Node>(Node{static_cast<NodeId>(new_id), {}});
   Node* node = def.node.get();
   nodes_[new_id] = std::move(def);
   execution_plan_.push_back(new_id);
@@ -131,7 +161,7 @@ absl::Status GraphFloat32::InsertNodeAfter(NodeId id, Node** new_node) {
 
   const NodeId new_id = nodes_.size();
   NodeDef def;
-  def.node = absl::make_unique<Node>(Node{static_cast<NodeId>(new_id), {}});
+  def.node = std::make_unique<Node>(Node{static_cast<NodeId>(new_id), {}});
   *new_node = def.node.get();
   nodes_[new_id] = std::move(def);
   execution_plan_.insert(execution_plan_.begin() + idx + 1, new_id);
@@ -141,7 +171,7 @@ absl::Status GraphFloat32::InsertNodeAfter(NodeId id, Node** new_node) {
 Value* GraphFloat32::NewValue() {
   ValueDef def;
   def.value =
-      absl::make_unique<Value>(Value{static_cast<ValueId>(values_.size()), {}});
+      std::make_unique<Value>(Value{static_cast<ValueId>(values_.size()), {}});
   Value* value = def.value.get();
   values_.push_back(std::move(def));
   return value;
@@ -306,7 +336,7 @@ absl::Status GraphFloat32::MakeExactCopy(GraphFloat32* model) const {
   for (auto& value_def : values_) {
     model->values_.push_back({});
     if (value_def.value) {
-      model->values_.back().value = absl::make_unique<Value>(*value_def.value);
+      model->values_.back().value = std::make_unique<Value>(*value_def.value);
     }
   }
   // Add all nodes first.
@@ -315,7 +345,7 @@ absl::Status GraphFloat32::MakeExactCopy(GraphFloat32* model) const {
     model->nodes_[node_id] = {};
     auto& node_def = nodes_.at(node_id);
     if (node_def.node) {
-      model->nodes_[node_id].node = absl::make_unique<Node>(*node_def.node);
+      model->nodes_[node_id].node = std::make_unique<Node>(*node_def.node);
     }
   }
   // Wire up dependencies between nodes.
@@ -476,21 +506,36 @@ absl::Status AddOutput(GraphFloat32* graph, const Node* from_node,
 
 absl::Status ConnectTwoNodes(GraphFloat32* graph, const Node* from_node,
                              const Node* to_node, Value** output) {
-  Value* link;
-  RETURN_IF_ERROR(AddOutput(graph, from_node, &link));
-  RETURN_IF_ERROR(graph->AddConsumer(to_node->id, link->id));
-  *output = link;
+  const Node* output_producer =
+      *output ? graph->FindProducer((*output)->id) : nullptr;
+  // Output is already initialized, but producer is not from_node.
+  if (*output && output_producer && output_producer->id != from_node->id) {
+    return absl::InvalidArgumentError("Wrong output is passed.");
+  }
+  // Output is already initialized, and producer is from_node.
+  if (*output) {
+    RETURN_IF_ERROR(graph->AddConsumer(to_node->id, (*output)->id));
+  } else {
+    // Output is not initialized.
+    Value* link;
+    RETURN_IF_ERROR(AddOutput(graph, from_node, &link));
+    RETURN_IF_ERROR(graph->AddConsumer(to_node->id, link->id));
+    *output = link;
+  }
   return absl::OkStatus();
 }
 
-bool IsBatchMatchesForAllValues(const GraphFloat32& model) {
+absl::Status CheckBatchSizeForAllValues(const GraphFloat32& model) {
+  if (model.values().empty()) return absl::OkStatus();
   const int32_t b = model.values()[0]->tensor.shape.b;
   for (auto value : model.values()) {
     if (value->tensor.shape.b != b) {
-      return false;
+      return absl::InvalidArgumentError(
+          absl::StrCat("Batch size mismatch, expected ", b, " but got ",
+                       value->tensor.shape.b));
     }
   }
-  return true;
+  return absl::OkStatus();
 }
 
 }  // namespace gpu

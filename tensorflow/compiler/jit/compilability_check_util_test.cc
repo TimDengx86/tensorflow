@@ -34,7 +34,16 @@ limitations under the License.
 namespace tensorflow {
 namespace {
 
+AttrValue FuncListAttr(const absl::Span<const char* const> names) {
+  AttrValue attr;
+  for (const char* name : names) {
+    attr.mutable_list()->add_func()->set_name(name);
+  }
+  return attr;
+}
+
 constexpr char kFunctionalIfNodeName[] = "If";
+constexpr char kFunctionalCaseNodeName[] = "Case";
 constexpr char kFunctionalWhileNodeName[] = "While";
 constexpr char kCompilableFunctionName[] = "CompilableFn";
 constexpr char kCompilableFunctionNodeName[] = "n_c";
@@ -75,14 +84,19 @@ class CompilabilityCheckUtilTest : public ::testing::Test {
     op_filter_.allow_ops_producing_or_consuming_variant = false;
     op_filter_.allow_inaccurate_ops = false;
     op_filter_.allow_slow_ops = false;
+    op_filter_.allow_outside_compiled = false;
 
-    checker_ = absl::make_unique<RecursiveCompilabilityChecker>(op_filter_,
-                                                                device_type_);
+    checker_ = CreateCompilabilityChecker();
+  }
+
+  std::unique_ptr<RecursiveCompilabilityChecker> CreateCompilabilityChecker() {
+    return std::make_unique<RecursiveCompilabilityChecker>(op_filter_,
+                                                            device_type_);
   }
 
   FunctionLibraryRuntime* GetFunctionLibraryRuntime() {
     OptimizerOptions opts;
-    pflr_ = absl::make_unique<ProcessFunctionLibraryRuntime>(
+    pflr_ = std::make_unique<ProcessFunctionLibraryRuntime>(
         nullptr, Env::Default(), /*config=*/nullptr, TF_GRAPH_DEF_VERSION,
         flib_def_.get(), opts);
 
@@ -92,9 +106,9 @@ class CompilabilityCheckUtilTest : public ::testing::Test {
   RecursiveCompilabilityChecker::OperationFilter op_filter_;
   DeviceType device_type_ = DeviceType(DEVICE_CPU_XLA_JIT);
   std::unique_ptr<FunctionDefLibrary> func_library_ =
-      absl::make_unique<FunctionDefLibrary>();
+      std::make_unique<FunctionDefLibrary>();
   std::unique_ptr<FunctionLibraryDefinition> flib_def_ =
-      absl::make_unique<FunctionLibraryDefinition>(OpRegistry::Global(),
+      std::make_unique<FunctionLibraryDefinition>(OpRegistry::Global(),
                                                    *func_library_);
   std::unique_ptr<RecursiveCompilabilityChecker> checker_;
   std::unique_ptr<ProcessFunctionLibraryRuntime> pflr_;
@@ -131,6 +145,35 @@ TEST_F(CompilabilityCheckUtilTest, CheckNonFunctionalNodes) {
                                 "unsupported op"));
   ASSERT_EQ(1, uncompilable_node_info.stack_trace.size());
   ASSERT_EQ("", uncompilable_node_info.stack_trace.at(0).function_name);
+}
+
+TEST_F(CompilabilityCheckUtilTest, CheckOutsideCompiledNode) {
+  GraphDefBuilder builder(GraphDefBuilder::kFailImmediately);
+  auto opts = builder.opts();
+  Node* const0 = ops::SourceOp("InputFloatOp", opts);
+  Node* uncompilable_op = ops::UnaryOp("MissingKernel", const0, opts);
+  uncompilable_op->AddAttr("_xla_outside_compilation", "0");
+  GraphDef graph_def;
+  TF_EXPECT_OK(builder.ToGraphDef(&graph_def));
+
+  auto* flib_runtime = GetFunctionLibraryRuntime();
+
+  // Outside compiled ops are considered by default..
+  EXPECT_FALSE(checker_->IsCompilableNode(*uncompilable_op, flib_runtime));
+
+  const auto uncompilable_nodes =
+      checker_->FindUncompilableNodes(*uncompilable_op, flib_runtime);
+  ASSERT_EQ(1, uncompilable_nodes.size());
+
+  op_filter_.allow_outside_compiled = true;
+  checker_ = CreateCompilabilityChecker();
+  // With filter option outside compiled ops are ignored and considered
+  // compilable.
+  EXPECT_TRUE(checker_->IsCompilableNode(*uncompilable_op, flib_runtime));
+
+  const auto uncompilable_nodes2 =
+      checker_->FindUncompilableNodes(*uncompilable_op, flib_runtime);
+  ASSERT_EQ(0, uncompilable_nodes2.size());
 }
 
 TEST_F(CompilabilityCheckUtilTest, CheckSimpleFunctionNode) {
@@ -353,6 +396,57 @@ TEST_F(CompilabilityCheckUtilTest, CheckFunctionalIfNode) {
   EXPECT_EQ(kUncompilableFunctionNodeTwoName, uncompilable_node_two.name);
   EXPECT_TRUE(absl::StrContains(uncompilable_node_one.uncompilable_reason,
                                 "unsupported op"));
+}
+
+TEST_F(CompilabilityCheckUtilTest, CheckFunctionalCaseNode) {
+  FunctionDefLibrary flib;
+  *flib.add_function() = FunctionDefHelper::Define(
+      /*Function*/ kUncompilableFunctionName,
+      /*Inputs*/ {"n_a:float"},
+      /*Outputs*/ {"n_c_uncompilable:float"},
+      /*Attributes*/ {},
+      // Node info
+      {{{kUncompilableFunctionNodeName}, "MissingKernel", {"n_a"}}});
+  *flib.add_function() = FunctionDefHelper::Define(
+      /*Function*/ kUncompilableFunctionTwoName,
+      /*Inputs*/ {"n_a:float"},
+      /*Outputs*/ {"n_d_uncompilable:float"},
+      /*Attribute*/ {},
+      // Node info
+      {{{kUncompilableFunctionNodeTwoName}, "MissingKernel", {"n_a"}}});
+
+  Scope root = Scope::NewRootScope().ExitOnError();
+  TF_ASSERT_OK(root.graph()->AddFunctionLibrary(flib));
+  auto branch_index = ops::Placeholder(root.WithOpName("pred"), DT_INT32);
+  auto placeholder = ops::Placeholder(root.WithOpName("A"), DT_INT32);
+  std::vector<NodeBuilder::NodeOut> inputes(
+      {NodeBuilder::NodeOut(placeholder.node())});
+  Node* case_node;
+  TF_ASSERT_OK(
+      NodeBuilder(kFunctionalCaseNodeName, "Case", &root.graph()->flib_def())
+          .Input(branch_index.node())
+          .Input(inputes)
+          .Attr("branches", FuncListAttr({kUncompilableFunctionName,
+                                          kUncompilableFunctionTwoName}))
+          .Attr("Tout", {DT_INT32})
+          .Finalize(root.graph(), &case_node));
+  std::unique_ptr<Graph> graph(new Graph(OpRegistry::Global()));
+  TF_ASSERT_OK(root.ToGraph(graph.get()));
+
+  flib_def_.reset(new FunctionLibraryDefinition(OpRegistry::Global(), flib));
+
+  auto case_node_it = std::find_if(
+      graph->nodes().begin(), graph->nodes().end(),
+      [&](const Node* n) { return n->name() == kFunctionalCaseNodeName; });
+  EXPECT_NE(case_node_it, graph->nodes().end());
+  auto* flib_runtime = GetFunctionLibraryRuntime();
+
+  op_filter_.require_always_compilable = false;
+  checker_ = CreateCompilabilityChecker();
+  EXPECT_TRUE(checker_->IsCompilableNode(**case_node_it, flib_runtime));
+  op_filter_.require_always_compilable = true;
+  checker_ = CreateCompilabilityChecker();
+  EXPECT_FALSE(checker_->IsCompilableNode(**case_node_it, flib_runtime));
 }
 
 TEST_F(CompilabilityCheckUtilTest, TestCanNotTriggerXlaCompilation) {

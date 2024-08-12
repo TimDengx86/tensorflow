@@ -15,29 +15,44 @@ limitations under the License.
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
-#include "mlir/Dialect/Shape/IR/Shape.h"  // from @llvm-project
-#include "mlir/Dialect/StandardOps/IR/Ops.h"  // from @llvm-project
-#include "mlir/IR/Dialect.h"  // from @llvm-project
-#include "tensorflow/compiler/mlir/hlo/include/mlir-hlo/Dialect/mhlo/IR/hlo_ops.h"
-#include "tensorflow/compiler/mlir/tensorflow/ir/tf_executor.h"
-#include "tensorflow/compiler/mlir/tensorflow/ir/tf_ops.h"
+#include "absl/algorithm/container.h"
+#include "absl/log/log.h"
+#include "absl/strings/string_view.h"
+#include "mlir/IR/BuiltinOps.h"  // from @llvm-project
+#include "mlir/IR/MLIRContext.h"  // from @llvm-project
+#include "mlir/IR/OwningOpRef.h"  // from @llvm-project
 #include "tensorflow/compiler/mlir/tensorflow/transforms/bridge.h"
-#include "tensorflow/compiler/mlir/tensorflow/transforms/passes.h"
 #include "tensorflow/compiler/mlir/tensorflow/translate/import_model.h"
 #include "tensorflow/compiler/mlir/tensorflow/translate/mlir_roundtrip_flags.h"
-#include "tensorflow/compiler/mlir/tensorflow/utils/compile_mlir_util.h"
 #include "tensorflow/compiler/mlir/tensorflow/utils/device_util.h"
-#include "tensorflow/compiler/mlir/tensorflow/utils/error_util.h"
 #include "tensorflow/compiler/mlir/tensorflow/utils/import_utils.h"
-#include "tensorflow/compiler/mlir/xla/mlir_hlo_to_hlo.h"
+#include "tensorflow/compiler/mlir/tf2xla/api/v1/compile_mlir_util.h"
 #include "tensorflow/compiler/tf2xla/tf2xla.h"
+#include "tensorflow/compiler/tf2xla/tf2xla.pb.h"
 #include "tensorflow/compiler/tf2xla/tf2xla_util.h"
-#include "tensorflow/compiler/xla/client/xla_computation.h"
+#include "xla/client/xla_computation.h"
+#include "tensorflow/core/common_runtime/device_set.h"
+#include "tensorflow/core/framework/device.h"
+#include "tensorflow/core/framework/device_attributes.pb.h"
+#include "tensorflow/core/framework/function.h"
+#include "tensorflow/core/framework/graph.pb.h"
+#include "tensorflow/core/framework/graph_debug_info.pb.h"
+#include "tensorflow/core/framework/op.h"
+#include "tensorflow/core/framework/tensor_shape.pb.h"
+#include "tensorflow/core/framework/types.h"
+#include "tensorflow/core/framework/types.pb.h"
+#include "tensorflow/core/graph/graph.h"
+#include "tensorflow/core/platform/errors.h"
+#include "tensorflow/core/platform/status.h"
+#include "tensorflow/core/platform/types.h"
+#include "tsl/platform/errors.h"
+#include "tsl/platform/statusor.h"
 
 namespace tensorflow {
 
@@ -60,13 +75,17 @@ Status ConvertInputInfo(
     GraphImportConfig* specs) {
   std::vector<std::string> array_names;
   std::vector<std::string> data_types;
-  std::vector<std::vector<int>> shapes;
+  std::vector<std::optional<std::vector<int>>> shapes;
   for (const tf2xla::Feed& feed : config.feed()) {
     std::string place_holder_name =
         feed_name_remap.at(TensorIdToString(feed.id()));
     array_names.push_back(place_holder_name);
     data_types.push_back(
         feed.type() == DT_INVALID ? "" : DataType_Name(feed.type()));
+    if (feed.shape().unknown_rank()) {
+      shapes.push_back(std::nullopt);
+      continue;
+    }
     std::vector<int> dims;
     dims.reserve(feed.shape().dim_size());
     absl::c_for_each(feed.shape().dim(), [&](const TensorShapeProto::Dim d) {
@@ -88,18 +107,6 @@ Status ConvertOutputInfo(const tf2xla::Config& config,
   }
 
   return ParseOutputArrayInfo(array_names, &specs->outputs);
-}
-
-static void RegisterDialects() {
-  static bool init_once = []() {
-    mlir::registerDialect<mlir::tf_executor::TensorFlowExecutorDialect>();
-    mlir::registerDialect<mlir::TF::TensorFlowDialect>();
-    mlir::registerDialect<mlir::StandardOpsDialect>();
-    mlir::registerDialect<mlir::mhlo::MhloDialect>();
-    mlir::registerDialect<mlir::shape::ShapeDialect>();
-    return true;
-  }();
-  (void)init_once;
 }
 
 }  // namespace
@@ -150,11 +157,9 @@ Status ConvertGraphDefToXlaViaMlir(
     }
   }
 
-  RegisterDialects();
   mlir::MLIRContext context;
-  context.loadAllGloballyRegisteredDialects();
   TF_ASSIGN_OR_RETURN(
-      mlir::OwningModuleRef module,
+      mlir::OwningOpRef<mlir::ModuleOp> module,
       ConvertGraphdefToMlir(pruned_graph_def, debug_info, specs, &context));
 
   // Construct a CPU device and add the device to the operations.
@@ -172,10 +177,10 @@ Status ConvertGraphDefToXlaViaMlir(
   // Convert the MLIR module to XLA computation. If the input graph can't be
   // lowered down to a single graph node with a single island by the previous
   // step, this step will return an error.
-  return ConvertMLIRToXlaComputation(*module, /*device_type=*/"XLA_CPU_JIT",
-                                     computation,
-                                     /*use_tuple_args=*/false,
-                                     /*always_return_tuple=*/true);
+  return ConvertMLIRToXlaComputation(
+      *module, /*device_type=*/"XLA_CPU_JIT", computation,
+      /*use_tuple_args=*/false, /*prefer_tf2xla=*/false,
+      /*return_tuple=*/true);
 }
 
 }  // namespace tensorflow

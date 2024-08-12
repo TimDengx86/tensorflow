@@ -18,38 +18,19 @@ limitations under the License.
 #include "llvm/ADT/ArrayRef.h"
 #include "mlir/IR/Attributes.h"  // from @llvm-project
 #include "mlir/IR/Builders.h"  // from @llvm-project
+#include "mlir/IR/BuiltinTypes.h"  // from @llvm-project
 #include "mlir/IR/Dialect.h"  // from @llvm-project
-#include "mlir/IR/StandardTypes.h"  // from @llvm-project
 #include "mlir/IR/Types.h"  // from @llvm-project
 #include "mlir/Support/LogicalResult.h"  // from @llvm-project
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_ops.h"
 #include "tensorflow/compiler/mlir/tensorflow/transforms/constant_fold.h"
 #include "tensorflow/compiler/mlir/tensorflow/utils/convert_tensor.h"
+#include "xla/stream_executor/stream_executor.h"
 #include "tensorflow/core/framework/logging.h"
-#include "tensorflow/stream_executor/lib/statusor.h"
-#include "tensorflow/stream_executor/stream_executor.h"
+#include "tsl/platform/statusor.h"
 
 namespace mlir {
 namespace {
-
-// Since this method is passed to MLIR as decode hook it has to conform
-// to LLVM style used by MLIR.
-LogicalResult DecodeOpaqueTensorHook(const OpaqueElementsAttr input,
-                                     ElementsAttr& output) {  // NOLINT
-  Builder builder(input.getType().getContext());
-  auto decoded_attr_or = tensorflow::DecodeOpaqueTensor(input, builder);
-  if (!decoded_attr_or.ok()) {
-    VLOG(2) << decoded_attr_or.status().error_message();
-    return failure();
-  }
-
-  output = decoded_attr_or.ValueOrDie();
-  return success();
-}
-
-static bool init_hooks = ([] () {
-  TF::TensorFlowDialect::RegisterDecodeConstantHook(DecodeOpaqueTensorHook);
-}(), true);
 
 }  // anonymous namespace
 }  // namespace mlir

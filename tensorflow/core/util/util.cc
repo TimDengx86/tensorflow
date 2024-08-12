@@ -15,9 +15,11 @@ limitations under the License.
 
 #include "tensorflow/core/util/util.h"
 
+#include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/lib/gtl/inlined_vector.h"
 #include "tensorflow/core/lib/strings/strcat.h"
 #include "tensorflow/core/platform/logging.h"
+#include "tensorflow/core/util/port.h"
 
 namespace tensorflow {
 
@@ -96,21 +98,21 @@ string PrintMemory(const char* ptr, size_t n) {
   return ret;
 }
 
-string SliceDebugString(const TensorShape& shape, const int64 flat) {
+string SliceDebugString(const TensorShape& shape, const int64_t flat) {
   // Special case rank 0 and 1
   const int dims = shape.dims();
   if (dims == 0) return "";
   if (dims == 1) return strings::StrCat("[", flat, "]");
 
   // Compute strides
-  gtl::InlinedVector<int64, 32> strides(dims);
+  absl::InlinedVector<int64_t, 32UL> strides(dims);
   strides.back() = 1;
   for (int i = dims - 2; i >= 0; i--) {
     strides[i] = strides[i + 1] * shape.dim_size(i + 1);
   }
 
   // Unflatten index
-  int64 left = flat;
+  int64_t left = flat;
   string result;
   for (int i = 0; i < dims; i++) {
     strings::StrAppend(&result, i ? "," : "[", left / strides[i]);
@@ -120,20 +122,71 @@ string SliceDebugString(const TensorShape& shape, const int64 flat) {
   return result;
 }
 
-#ifdef INTEL_MKL
-bool DisableMKL() {
-  enum MklStatus { MKL_DEFAULT = 0, MKL_ON = 1, MKL_OFF = 2 };
-  static MklStatus status = MKL_DEFAULT;
-  if (status == MKL_DEFAULT) {
-    char* tf_disable_mkl = getenv("TF_DISABLE_MKL");
-    if ((tf_disable_mkl != NULL) && (std::stoi(tf_disable_mkl) == 1)) {
-      VLOG(2) << "TF-MKL: Disabling MKL";
-      status = MKL_OFF;
-    } else {
-      status = MKL_ON;
-    }
-  }
-  return status == MKL_OFF ? true : false;
+// TODO(penporn): Remove this function from util.cc
+bool IsMKLEnabled() { return IsMklEnabled(); }
+
+void DataTypeUnsupportedWarning(const DataType& dt) {
+  static absl::once_flag cpu_dt_warn_once_flag;
+  absl::call_once(cpu_dt_warn_once_flag, [dt] {
+    LOG(ERROR) << "oneDNN supports " << DataType_Name(dt) << " only on "
+               << "platforms with AVX-512. Falling back to the default "
+               << "Eigen-based implementation if present.";
+  });
 }
+
+bool IsDataTypeSupportedByOneDNNOnThisCPU(const DataType& dt) {
+  bool result = false;
+#ifdef INTEL_MKL
+  using port::TestCPUFeature;
+  if (dt == DT_FLOAT) {
+    result = true;
+  } else if (dt == DT_BFLOAT16) {
+    result = (TestCPUFeature(port::CPUFeature::AVX512F) ||
+              TestCPUFeature(port::CPUFeature::AVX_NE_CONVERT));
+    if (result) VLOG(2) << "CPU supports " << DataType_Name(dt);
+  } else if (DataTypeIsQuantized(dt)) {
+    result = (TestCPUFeature(port::CPUFeature::AVX512F) ||
+              TestCPUFeature(port::CPUFeature::AVX_VNNI_INT8));
+    if (result) VLOG(2) << "CPU supports " << DataType_Name(dt);
+  } else if (dt == DT_HALF) {
+    // Float16 is not supported in oneDNN v2.x
+#ifdef ENABLE_ONEDNN_V3
+    // Some CPUs that don't support AVX-512 use AVX-NE-CONVERT to cast to and
+    // from FP32
+    result = ((TestCPUFeature(port::CPUFeature::AVX512BW) &&
+               (TestCPUFeature(port::CPUFeature::AVX512_FP16) ||
+                TestCPUFeature(port::CPUFeature::AMX_FP16))) ||
+              TestCPUFeature(port::CPUFeature::AVX_NE_CONVERT));
+    if (result) VLOG(2) << "CPU supports " << DataType_Name(dt);
+#endif  // ENABLE_ONEDNN_V3
+  } else {
+    LOG(WARNING) << "Not handling type " << DataType_Name(dt);
+  }
 #endif  // INTEL_MKL
+  return result;
+}
+
+bool IsAMXDataTypeSupportedByOneDNNOnThisCPU(const DataType& dt) {
+  bool result = false;
+#ifdef INTEL_MKL
+  using port::TestCPUFeature;
+  if (dt == DT_BFLOAT16) {
+    result = TestCPUFeature(port::CPUFeature::AMX_BF16);
+    if (result) VLOG(2) << "CPU supports AMX " << DataType_Name(dt);
+  } else if (dt == DT_HALF) {
+    // Float16 is not supported in oneDNN v2.x
+#ifdef ENABLE_ONEDNN_V3
+    result = TestCPUFeature(port::CPUFeature::AMX_FP16);
+    if (result) VLOG(2) << "CPU supports AMX " << DataType_Name(dt);
+#endif  // ENABLE_ONEDNN_V3
+  } else if (DataTypeIsQuantized(dt)) {
+    result = TestCPUFeature(port::CPUFeature::AMX_INT8);
+    if (result) VLOG(2) << "CPU supports AMX " << DataType_Name(dt);
+  } else {
+    LOG(WARNING) << "Not handling type " << DataType_Name(dt);
+  }
+#endif  // INTEL_MKL
+  return result;
+}
+
 }  // namespace tensorflow

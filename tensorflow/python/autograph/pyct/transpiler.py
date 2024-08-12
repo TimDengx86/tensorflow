@@ -14,10 +14,6 @@
 # ==============================================================================
 """Generic source code transformation infrastructure."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import inspect
 import threading
 import types
@@ -80,9 +76,9 @@ def _wrap_into_factory(nodes, entity_name, inner_factory_name,
         return inner_factory
 
   The lexical scoping is created using dummy symbol declarations which create
-  local fariables in the body of the outer factory, so that the Python parser
+  local variables in the body of the outer factory, so that the Python parser
   correctly marks them as free non-global variables upon load (that is, it
-  creates cell slots for each symbol. Thes symbols are initialized with None,
+  creates cell slots for each symbol. These symbols are initialized with None,
   but their values are not expected to be used; instead, the caller is expected
   to replace them with the cells of the source entity. For more details, see:
   https://docs.python.org/3/reference/executionmodel.html#binding-of-names
@@ -242,7 +238,7 @@ class GenericTranspiler(object):
           result = <<transform node>>
           return result
 
-      transformer = MyTransfomer()
+      transformer = MyTransformer()
 
       result = transformer.transform(f, ...)
       # result is the output
@@ -275,9 +271,9 @@ class GenericTranspiler(object):
     Args:
       obj: A Python object, function, type, etc.
       user_context: An opaque object (may be None) that is forwarded to
-        transform_ast, through the ctx.user_context argument.
+        transform_ast, through the ctx.user attribute.
     Returns:
-      Tre result of calling transform_function.
+      The result of calling transform_function.
 
     Raises:
       NotImplementedError: if the type of obj is not handled.
@@ -288,7 +284,7 @@ class GenericTranspiler(object):
     raise NotImplementedError('Non-function: {}'.format(type(obj)))
 
   def _erase_arg_defaults(self, node):
-    """Erase argde fault expressions, which would otherwise be unbound."""
+    """Erase arg default expressions, which would otherwise be unbound."""
     args = node.args
     for i in range(len(args.defaults)):
       args.defaults[i] = parser.parse_expression('None')
@@ -308,7 +304,7 @@ class GenericTranspiler(object):
     Args:
       mod: A Python module.
       user_context: An opaque object (may be None) that is forwarded to
-        transform_ast, through the ctx.user_context argument.
+        transform_ast, through the ctx.user attribute.
     Returns:
       List[Tuple[Any, Any]]. By default it returns the output of transform_ast,
       evaluated on each supported member, other than modules, together with a
@@ -336,7 +332,7 @@ class GenericTranspiler(object):
     Args:
       fn: A function or lambda.
       user_context: An opaque object (may be None) that is forwarded to
-        transform_ast, through the ctx.user_context argument.
+        transform_ast, through the ctx.user attribute.
     Returns:
       Tuple[Any, Any]. By default it returns the output of transform_ast,
       together with a `transformer.Context` containing information about the
@@ -385,7 +381,7 @@ class PyToPy(GenericTranspiler):
           node = <<transform node, usually using ast.NodeTransformer classes>>
           return node
 
-      transformer = MyTransfomer()
+      transformer = MyTransformer()
 
       new_f, module, source_map = transformer.transform_function(f, ...)
       # new_f is a function with signature identical to f
@@ -434,7 +430,7 @@ class PyToPy(GenericTranspiler):
     return cached_factory
 
   def transform_function(self, fn, user_context):
-    """Transforms a function. See GenericTranspiler.trasnform_function.
+    """Transforms a function. See GenericTranspiler.transform_function.
 
     This overload wraps the parent's `transform_function`, adding caching and
     facilities to instantiate the output as a Python object. It also
@@ -444,7 +440,8 @@ class PyToPy(GenericTranspiler):
     Args:
       fn: A function or lambda.
       user_context: An opaque object (may be None) that is forwarded to
-        transform_ast, through the ctx.user_context argument.
+        transform_ast, through the ctx.user attribute.
+
     Returns:
       A tuple:
         * A function or lambda with the same signature and closure as `fn`

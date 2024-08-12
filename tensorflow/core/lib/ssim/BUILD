@@ -1,15 +1,12 @@
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = [
         "//tensorflow/core:__pkg__",
     ],
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
 )
 
-filegroup(
+alias(
     name = "testdata",
-    srcs = [
-        "testdata/checkerboard1.png",
-        "testdata/checkerboard2.png",
-        "testdata/checkerboard3.png",
-    ],
+    actual = "//tensorflow/core/lib/ssim/testdata:testdata",
 )

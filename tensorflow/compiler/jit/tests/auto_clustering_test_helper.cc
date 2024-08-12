@@ -15,11 +15,11 @@ limitations under the License.
 
 #include "tensorflow/compiler/jit/tests/auto_clustering_test_helper.h"
 
+#include "absl/status/statusor.h"
 #include "absl/strings/numbers.h"
 #include "tensorflow/compiler/jit/mark_for_compilation_pass.h"
 #include "tensorflow/compiler/jit/xla_cluster_util.h"
-#include "tensorflow/compiler/xla/status_macros.h"
-#include "tensorflow/compiler/xla/statusor.h"
+#include "xla/status_macros.h"
 #include "tensorflow/core/common_runtime/graph_constructor.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/lib/io/random_inputstream.h"
@@ -33,7 +33,7 @@ limitations under the License.
 
 namespace tensorflow {
 namespace {
-xla::StatusOr<string> SummarizeClustering(
+absl::StatusOr<string> SummarizeClustering(
     const GraphDef& auto_clustered_graph_def) {
   testing::ResetClusterSequenceNumber();
   Graph graph(OpRegistry::Global());
@@ -50,7 +50,7 @@ xla::StatusOr<string> SummarizeClustering(
   int clustered_nodes = 0;
   for (Node* n : graph.op_nodes()) {
     int cluster = kNoCluster;
-    if (absl::optional<absl::string_view> maybe_cluster =
+    if (std::optional<absl::string_view> maybe_cluster =
             GetXlaClusterForNode(*n)) {
       maybe_cluster->remove_prefix(absl::string_view("cluster_").size());
       TF_RET_CHECK(absl::SimpleAtoi(*maybe_cluster, &cluster));
@@ -96,7 +96,7 @@ Status AssertGraphDefIsUnclustered(const GraphDef& graphdef) {
     }
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 Status ReadTextProtoFromString(Env* env, const string& data,
@@ -104,7 +104,7 @@ Status ReadTextProtoFromString(Env* env, const string& data,
   if (!::tensorflow::protobuf::TextFormat::ParseFromString(data, proto)) {
     return errors::DataLoss("Can't parse input data as text proto");
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 }  // namespace
 
@@ -122,7 +122,7 @@ Status AutoClusteringTest::RunAutoClusteringTestImpl(
     LOG(INFO) << "Not running "
               << ::testing::UnitTest::GetInstance()->current_test_info()->name()
               << " since test was not built with --config=cuda";
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   TF_RETURN_IF_ERROR(AssertGraphDefIsUnclustered(graphdef));
@@ -159,7 +159,7 @@ Status AutoClusteringTest::RunAutoClusteringTestImpl(
 
   EXPECT_EQ(golden_file_contents, clustering_summary);
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 Status AutoClusteringTest::RunAutoClusteringTestWithPbtxt(
@@ -214,15 +214,15 @@ Status BenchmarkMarkForCompilation(absl::string_view graph_def_path,
   TF_RETURN_IF_ERROR(runner.AddGpus(8));
 
   for (auto _ : state) {
-    StopBenchmarkTiming();
+    state.PauseTiming();
     GraphDef result;
     GraphDef graph_def_copy = graph_def;
-    StartBenchmarkTiming();
+    state.ResumeTiming();
     TF_RETURN_IF_ERROR(runner.Run("MarkForCompilationPass",
                                   std::move(graph_def_copy), &result));
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 #endif  // PLATFORM_GOOGLE
 

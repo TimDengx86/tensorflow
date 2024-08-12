@@ -17,22 +17,23 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_PROFILER_RPC_CLIENT_PROFILER_CLIENT_H_
 #define TENSORFLOW_CORE_PROFILER_RPC_CLIENT_PROFILER_CLIENT_H_
 
+#include <memory>
+#include <string>
+
+#include "absl/strings/string_view.h"
+#include "absl/time/time.h"
 #include "tensorflow/core/platform/status.h"
-#include "tensorflow/core/profiler/profiler_analysis.grpc.pb.h"
-#include "tensorflow/core/profiler/profiler_service.grpc.pb.h"
+#include "tsl/profiler/protobuf/profiler_analysis.grpc.pb.h"
+#include "tsl/profiler/protobuf/profiler_service.grpc.pb.h"
+#include "tsl/profiler/rpc/client/profiler_client.h"
 
 namespace tensorflow {
 namespace profiler {
 
-Status ProfileGrpc(const std::string& service_addr,
-                   const ProfileRequest& request, ProfileResponse* response);
-
-Status NewSessionGrpc(const std::string& service_addr,
-                      const NewProfileSessionRequest& request,
-                      NewProfileSessionResponse* response);
-
-Status MonitorGrpc(const std::string& service_addr,
-                   const MonitorRequest& request, MonitorResponse* response);
+using tsl::profiler::MonitorGrpc;            // NOLINT
+using tsl::profiler::NewSessionGrpc;         // NOLINT
+using tsl::profiler::ProfileGrpc;            // NOLINT
+using tsl::profiler::RemoteProfilerSession;  // NOLINT
 
 }  // namespace profiler
 }  // namespace tensorflow

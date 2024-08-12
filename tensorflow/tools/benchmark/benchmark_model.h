@@ -16,6 +16,10 @@ limitations under the License.
 #ifndef TENSORFLOW_TOOLS_BENCHMARK_BENCHMARK_MODEL_H_
 #define TENSORFLOW_TOOLS_BENCHMARK_BENCHMARK_MODEL_H_
 
+#include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/types.pb.h"
+#include "tensorflow/core/platform/status.h"
+#include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/public/session.h"
 #include "tensorflow/core/util/stat_summarizer.h"
 
@@ -39,15 +43,15 @@ Status InitializeSession(int num_threads, const string& graph,
 Status RunBenchmark(const std::vector<InputLayerInfo>& inputs,
                     const std::vector<string>& outputs,
                     const std::vector<string>& targets, Session* session,
-                    StatSummarizer* stats, int64* inference_time_us);
+                    StatSummarizer* stats, int64_t* inference_time_us);
 
 // Runs the model multiple time, keeping track of timing information.
 Status TimeMultipleRuns(double sleep_seconds, int num_runs, double max_time_s,
                         const std::vector<InputLayerInfo>& inputs,
                         const std::vector<string>& outputs,
                         const std::vector<string>& targets, Session* session,
-                        StatSummarizer* stats, int64* total_time_us,
-                        int64* actual_num_runs);
+                        StatSummarizer* stats, int64_t* total_time_us,
+                        int64_t* actual_num_runs);
 
 // Handles all setup and argument parsing.
 int Main(int argc, char** argv);

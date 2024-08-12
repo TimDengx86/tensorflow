@@ -15,8 +15,8 @@ limitations under the License.
 #ifndef TENSORFLOW_LITE_KERNELS_INTERNAL_REFERENCE_SOFTMAX_H_
 #define TENSORFLOW_LITE_KERNELS_INTERNAL_REFERENCE_SOFTMAX_H_
 
+#include <algorithm>
 #include <limits>
-#include <vector>
 
 #include "fixedpoint/fixedpoint.h"
 #include "tensorflow/lite/kernels/internal/common.h"
@@ -115,6 +115,9 @@ inline void Softmax(const SoftmaxParams& params,
     FixedPoint0 shifted_scale = FixedPoint0::FromRaw(GetReciprocal(
         sum_of_exps.raw(), kAccumulationIntegerBits, &num_bits_over_unit));
 
+    const int exponent = num_bits_over_unit + 31 - (sizeof(OutputT) * 8);
+    TFLITE_CHECK(0 <= exponent && exponent <= 31);
+
     for (int c = 0; c < depth; ++c) {
       int32_t input_diff =
           static_cast<int32_t>(input_data[i * depth + c]) - max_in_row;
@@ -127,8 +130,7 @@ inline void Softmax(const SoftmaxParams& params,
 
         FixedPoint0 exp_in_0 = exp_on_negative_values(scaled_diff_f8);
         int32_t unsat_output = gemmlowp::RoundingDivideByPOT(
-            (shifted_scale * exp_in_0).raw(),
-            num_bits_over_unit + 31 - (sizeof(OutputT) * 8));
+            (shifted_scale * exp_in_0).raw(), exponent);
 
         const int32_t shifted_output =
             unsat_output +
@@ -145,6 +147,23 @@ inline void Softmax(const SoftmaxParams& params,
   }
 }
 
+// Computes exp(input - max_input)
+inline int16_t SoftMaxCalculateExp(const SoftmaxParams& params,
+                                   const int16_t* input_data, const int depth,
+                                   int16_t max_in_row, int i, int c) {
+  int32_t input_diff = input_data[i * depth + c] - max_in_row;
+  // scale the input_diff such that [-65535, 0] correspond to [-10.0, 0.0]
+  // exp lut generated with range [-10, 0], as exp(-10) is negligible.
+  int32_t scaled_diff = MultiplyByQuantizedMultiplier(
+      input_diff, params.input_multiplier, params.input_left_shift);
+  // recenter to [-32768, 32767]
+  int32_t sym_scaled_diff = scaled_diff + 32767;
+  int16_t sat_sym_scaled_diff =
+      std::min(std::max(sym_scaled_diff, static_cast<int32_t>(-32768)),
+               static_cast<int32_t>(32767));
+  // apply the exp() LUT activation function
+  return LUTLookup(sat_sym_scaled_diff, params.exp_lut);
+}
 // Quantized softmax with int16_t input and int16_t output.
 inline void SoftmaxInt16(const SoftmaxParams& params,
                          const RuntimeShape& input_shape,
@@ -164,28 +183,16 @@ inline void SoftmaxInt16(const SoftmaxParams& params,
       max_in_row = std::max(max_in_row, input_data[i * depth + c]);
     }
 
-    // Compute exp(input - max_input)
-    std::vector<int16_t> exp_result_Q015(depth);
+    // This loops computes the exp values and their sum. We will need the exp
+    // values later on in the function so we cache them in the output_data
+    // buffer. This is an optimization done to avoid calculating the exp values
+    // twice making use of the output_data buffer as scratch memory.
+    int32_t sum_of_exps = 0;  // Q16.15 fixed point format.
+    int16_t* exp_results_Q015 = output_data + i * depth;
     for (int c = 0; c < depth; ++c) {
-      int32_t input_diff = input_data[i * depth + c] - max_in_row;
-      // scale the input_diff such that [-65535, 0] correspond to [-10.0, 0.0]
-      int32_t scaled_diff = MultiplyByQuantizedMultiplier(
-          input_diff, params.input_multiplier, params.input_left_shift);
-      // recenter to [-32768, 32767]
-      int32_t sym_scaled_diff = scaled_diff + 32767;
-      int16_t sat_sym_scaled_diff =
-          std::min(std::max(sym_scaled_diff, static_cast<int32_t>(-32768)),
-                   static_cast<int32_t>(32767));
-      // apply the exp() LUT activation function
-      exp_result_Q015[c] =
-          generic_int16_table_lookup(sat_sym_scaled_diff, params.exp_lut);
-    }
-
-    // sum_of_exps is a Q16.15 fixed point format.
-    int32_t sum_of_exps = 0;
-    for (int c = 0; c < depth; ++c) {
-      // Q16.15 + Q0.15
-      sum_of_exps += exp_result_Q015[c];
+      exp_results_Q015[c] =
+          SoftMaxCalculateExp(params, input_data, depth, max_in_row, i, c);
+      sum_of_exps += exp_results_Q015[c];
     }
 
     // Compute the reciprocal 1/sum_of_exps
@@ -203,15 +210,15 @@ inline void SoftmaxInt16(const SoftmaxParams& params,
         std::min(std::max(sym_shifted_sum, static_cast<int32_t>(-32768)),
                  static_cast<int32_t>(32767)));
     // apply 1/(1 + x) LUT activation function
-    int16_t reciprocal_scale_Q015 = generic_int16_table_lookup(
-        sat_sym_shifted_sum, params.one_over_one_plus_x_lut);
+    int16_t reciprocal_scale_Q015 =
+        LUTLookup(sat_sym_shifted_sum, params.one_over_one_plus_x_lut);
 
     // Rescale the exp_result with reciprocal
     // range of output is [0, 32767] correspond to [0.0, 1.0]
     for (int c = 0; c < depth; ++c) {
       uint8_t right_shift = 31 - headroom_plus_one;
       int64_t round = 1 << (right_shift - 1);
-      int32_t result = (static_cast<int64_t>(exp_result_Q015[c]) *
+      int32_t result = (static_cast<int64_t>(exp_results_Q015[c]) *
                             static_cast<int64_t>(reciprocal_scale_Q015) +
                         round) >>
                        right_shift;

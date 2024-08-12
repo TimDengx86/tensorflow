@@ -18,25 +18,24 @@ When a peer fails during MultiWorkerMirroredStrategy training. All workers
 should get Unavailable error.
 """
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import os
 
 import tensorflow as tf
 
 from tensorflow.python.distribute import collective_all_reduce_strategy as mwms_lib
-from tensorflow.python.distribute import combinations
 from tensorflow.python.distribute import multi_process_runner
 from tensorflow.python.distribute import multi_worker_test_base
+from tensorflow.python.distribute import test_util
 from tensorflow.python.eager import test
 
+RPC_PROTOCOL = "grpc"
 
 # Put it in top level so it executes in the child processes as well.
 mwms_lib.CollectiveAllReduceExtended._enable_check_health = True
 mwms_lib.CollectiveAllReduceExtended._check_health_interval = 3
-mwms_lib.CollectiveAllReduceExtended._check_health_initial_timeout = 6
+mwms_lib.CollectiveAllReduceExtended._check_health_initial_timeout = 0
+# This is needed for OSS, which issues all RPCs with fail_fast=false by default.
+mwms_lib.CollectiveAllReduceExtended._check_health_timeout = 1
 
 
 def get_attempt(strategy, attempts):
@@ -85,12 +84,13 @@ class PeerFailureTest(test.TestCase):
         return v.read_value().numpy()
 
     cluster_spec = multi_worker_test_base.create_cluster_spec(num_workers=2)
-    mpr = multi_process_runner.MultiProcessRunner(worker_fn, cluster_spec)
+    mpr = multi_process_runner.MultiProcessRunner(
+        worker_fn, cluster_spec, rpc_layer=RPC_PROTOCOL)
     mpr.start()
     # TODO(b/151232436): Always raise UnavailableError when a peer fails.
     with self.assertRaises(
         (tf.errors.UnavailableError, tf.errors.DeadlineExceededError)):
-      mpr.join(timeout=30)
+      mpr.join(timeout=60)
 
   def test_reduce_small_tensor(self):
     # This test simulates the case when a worker fails before or during reducing
@@ -118,12 +118,13 @@ class PeerFailureTest(test.TestCase):
       strategy.reduce("sum", value, axis=None)
 
     cluster_spec = multi_worker_test_base.create_cluster_spec(num_workers=2)
-    mpr = multi_process_runner.MultiProcessRunner(worker_fn, cluster_spec)
+    mpr = multi_process_runner.MultiProcessRunner(
+        worker_fn, cluster_spec, rpc_layer=RPC_PROTOCOL)
     mpr.start()
     # TODO(b/151232436): Always raise UnavailableError when a peer fails.
     with self.assertRaises(
         (tf.errors.UnavailableError, tf.errors.DeadlineExceededError)):
-      mpr.join(timeout=30)
+      mpr.join(timeout=60)
 
 
 class PeerFailureRecoverTest(test.TestCase):
@@ -147,7 +148,11 @@ class PeerFailureRecoverTest(test.TestCase):
     cluster_spec = multi_worker_test_base.create_cluster_spec(num_workers=2)
     attempts = multi_process_runner.manager().dict()
     mpr = multi_process_runner.MultiProcessRunner(
-        worker_fn, cluster_spec, args=(attempts,), auto_restart=True)
+        worker_fn,
+        cluster_spec,
+        rpc_layer=RPC_PROTOCOL,
+        args=(attempts,),
+        auto_restart=True)
     mpr.start()
     results = mpr.join(timeout=90).return_value
     self.assertEqual(results[0], results[1])
@@ -168,7 +173,11 @@ class PeerFailureRecoverTest(test.TestCase):
     cluster_spec = multi_worker_test_base.create_cluster_spec(num_workers=2)
     attempts = multi_process_runner.manager().dict()
     mpr = multi_process_runner.MultiProcessRunner(
-        worker_fn, cluster_spec, args=(attempts,), auto_restart=True)
+        worker_fn,
+        cluster_spec,
+        rpc_layer=RPC_PROTOCOL,
+        args=(attempts,),
+        auto_restart=True)
     mpr.start()
     results = mpr.join(timeout=90).return_value
     self.assertAllEqual(results, [[2.], [2.]])
@@ -207,10 +216,14 @@ class PeerFailureRecoverTest(test.TestCase):
     cluster_spec = multi_worker_test_base.create_cluster_spec(num_workers=2)
     attempts = multi_process_runner.manager().dict()
     mpr = multi_process_runner.MultiProcessRunner(
-        worker_fn, cluster_spec, args=(attempts,), auto_restart=True)
+        worker_fn,
+        cluster_spec,
+        rpc_layer=RPC_PROTOCOL,
+        args=(attempts,),
+        auto_restart=True)
     mpr.start()
     mpr.join(timeout=90)
 
 
 if __name__ == "__main__":
-  combinations.main()
+  test_util.main()

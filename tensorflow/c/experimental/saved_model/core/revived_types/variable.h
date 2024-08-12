@@ -13,8 +13,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#ifndef TENSORFLOW_C_EXPERIMENTAL_SAVED_MODEL_CORE_REVIVED_VARIABLE_H_
-#define TENSORFLOW_C_EXPERIMENTAL_SAVED_MODEL_CORE_REVIVED_VARIABLE_H_
+#ifndef TENSORFLOW_C_EXPERIMENTAL_SAVED_MODEL_CORE_REVIVED_TYPES_VARIABLE_H_
+#define TENSORFLOW_C_EXPERIMENTAL_SAVED_MODEL_CORE_REVIVED_TYPES_VARIABLE_H_
 
 #include <memory>
 
@@ -34,11 +34,11 @@ class Variable : public TensorHandleConvertible {
  public:
   // Creates an uninitialized resource variable. Note that a caller must
   // call "assign" to associate a value with the variable.
-  static Status CreateUninitialized(ImmediateExecutionContext* ctx,
-                                    DataType dtype, TensorShape shape,
-                                    absl::optional<std::string> name,
-                                    const char* raw_device_name,
-                                    std::unique_ptr<Variable>* output);
+  static Status CreateUninitialized(
+      ImmediateExecutionContext* ctx, DataType dtype, TensorShape shape,
+      absl::optional<std::string> name, const char* raw_device_name,
+      const std::vector<std::string>& component_devices,
+      std::unique_ptr<Variable>* output);
 
   // The dtype of the underlying variable.
   DataType dtype();
@@ -74,4 +74,4 @@ class Variable : public TensorHandleConvertible {
 
 }  // namespace tensorflow
 
-#endif  // TENSORFLOW_C_EXPERIMENTAL_SAVED_MODEL_CORE_REVIVED_VARIABLE_H_
+#endif  // TENSORFLOW_C_EXPERIMENTAL_SAVED_MODEL_CORE_REVIVED_TYPES_VARIABLE_H_

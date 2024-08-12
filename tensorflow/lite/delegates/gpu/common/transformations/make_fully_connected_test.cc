@@ -73,16 +73,16 @@ TEST(MakeFullyConnected, Smoke) {
 
   ASSERT_TRUE(graph.AddConsumer(conv1x1_node0->id, input->id).ok());
 
-  Value* output;
+  Value* output = nullptr;
   ASSERT_TRUE(AddOutput(&graph, conv1x1_node2, &output).ok());
   output->tensor.shape = BHWC(1, 1, 1, 32);
 
-  Value* link1;
+  Value* link1 = nullptr;
   ASSERT_TRUE(
       ConnectTwoNodes(&graph, conv1x1_node0, conv4x4_node1, &link1).ok());
   link1->tensor.shape = BHWC(1, 4, 4, 16);
 
-  Value* link2;
+  Value* link2 = nullptr;
   ASSERT_TRUE(
       ConnectTwoNodes(&graph, conv4x4_node1, conv1x1_node2, &link2).ok());
   link2->tensor.shape = BHWC(1, 1, 1, 16);
@@ -91,7 +91,7 @@ TEST(MakeFullyConnected, Smoke) {
   ASSERT_EQ(4, graph.values().size());
 
   auto transformation = NewMakeFullyConnectedFromConvolution();
-  ModelTransformer transformer(&graph, nullptr);
+  ModelTransformer transformer(&graph);
   transformer.Apply("make_fully_connected", transformation.get());
 
   ASSERT_EQ(3, graph.nodes().size());

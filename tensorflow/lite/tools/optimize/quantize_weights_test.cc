@@ -12,6 +12,8 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
+#include "tensorflow/lite/tools/optimize/quantize_weights.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -20,13 +22,13 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include "flatbuffers/flatbuffers.h"  // from @flatbuffers
 #include "flatbuffers/flexbuffers.h"  // from @flatbuffers
+#include "tensorflow/compiler/mlir/lite/quantization/lite/test_util.h"
 #include "tensorflow/core/lib/io/path.h"
 #include "tensorflow/core/platform/init_main.h"
 #include "tensorflow/core/util/command_line_flags.h"
-#include "tensorflow/lite/model.h"
+#include "tensorflow/lite/core/model.h"
 #include "tensorflow/lite/schema/schema_generated.h"
-#include "tensorflow/lite/tools/optimize/quantize_weights.h"
-#include "tensorflow/lite/tools/optimize/test_util.h"
+#include "tensorflow/lite/schema/schema_utils.h"
 
 namespace {
 tensorflow::string* g_test_model_dir = nullptr;
@@ -38,25 +40,25 @@ namespace {
 
 std::unique_ptr<FlatBufferModel> ReadTestModel() {
   auto model_path = tensorflow::io::JoinPath(
-      *g_test_model_dir, internal::kConvModelWith0Plus10Weights);
+      *g_test_model_dir, ::mlir::lite::internal::kConvModelWith0Plus10Weights);
   return FlatBufferModel::BuildFromFile(model_path.c_str());
 }
 
 std::unique_ptr<FlatBufferModel> ReadSharedWeightsTestModel() {
-  auto model_path = tensorflow::io::JoinPath(*g_test_model_dir,
-                                             internal::kModelWithSharedWeights);
+  auto model_path = tensorflow::io::JoinPath(
+      *g_test_model_dir, ::mlir::lite::internal::kModelWithSharedWeights);
   return FlatBufferModel::BuildFromFile(model_path.c_str());
 }
 
 std::unique_ptr<FlatBufferModel> ReadGatherTestModel() {
-  auto model_path = tensorflow::io::JoinPath(*g_test_model_dir,
-                                             internal::kQuantizedWithGather);
+  auto model_path = tensorflow::io::JoinPath(
+      *g_test_model_dir, ::mlir::lite::internal::kQuantizedWithGather);
   return FlatBufferModel::BuildFromFile(model_path.c_str());
 }
 
 std::unique_ptr<FlatBufferModel> ReadCustomOpTestModel() {
-  auto model_path =
-      tensorflow::io::JoinPath(*g_test_model_dir, internal::kModelWithCustomOp);
+  auto model_path = tensorflow::io::JoinPath(
+      *g_test_model_dir, ::mlir::lite::internal::kModelWithCustomOp);
   return FlatBufferModel::BuildFromFile(model_path.c_str());
 }
 
@@ -120,7 +122,7 @@ class QuantizeWeightsTest : public testing::Test {
       for (size_t i = 0; i < op->outputs()->size(); ++i) {
         if (op->outputs()->Get(i) == tensor_idx) {
           const uint32_t op_code_idx = op->opcode_index();
-          *op_code = model->operator_codes()->Get(op_code_idx)->builtin_code();
+          *op_code = GetBuiltinCode(model->operator_codes()->Get(op_code_idx));
           return true;
         }
       }
@@ -132,8 +134,8 @@ class QuantizeWeightsTest : public testing::Test {
 TEST_F(QuantizeWeightsTest, QuantizationSucceeds) {
   LoadBasicModel();
   flatbuffers::FlatBufferBuilder builder;
-  auto status = QuantizeWeights(&builder, model_, 0);
-  EXPECT_EQ(status, kTfLiteOk);
+  ASSERT_TRUE(
+      QuantizeWeights(&builder, model_, 0, QuantizerType::OLD_QUANTIZER).ok());
 
   const uint8_t* buffer = builder.GetBufferPointer();
   const Model* output_model = GetModel(buffer);
@@ -146,8 +148,9 @@ TEST_F(QuantizeWeightsTest, WeightsMinNumElements) {
   // happen, i.e. the original model is the same size as the old one.
   flatbuffers::FlatBufferBuilder builder;
   const uint64_t kWeightsMinNumElements = 1000000;
-  EXPECT_EQ(QuantizeWeights(&builder, model_, kWeightsMinNumElements),
-            kTfLiteOk);
+  ASSERT_TRUE(QuantizeWeights(&builder, model_, kWeightsMinNumElements,
+                              QuantizerType::OLD_QUANTIZER)
+                  .ok());
 
   const uint8_t* buffer = builder.GetBufferPointer();
   const Model* output_model = GetModel(buffer);
@@ -176,8 +179,8 @@ TEST_F(QuantizeWeightsTest, WeightsMinNumElements) {
 TEST_F(QuantizeWeightsTest, HybridConv) {
   LoadBasicModel();
   flatbuffers::FlatBufferBuilder builder;
-  auto status = QuantizeWeights(&builder, model_, 0);
-  EXPECT_EQ(status, kTfLiteOk);
+  ASSERT_TRUE(
+      QuantizeWeights(&builder, model_, 0, QuantizerType::OLD_QUANTIZER).ok());
 
   const uint8_t* buffer = builder.GetBufferPointer();
   const Model* output_model = GetModel(buffer);
@@ -195,7 +198,7 @@ TEST_F(QuantizeWeightsTest, HybridConv) {
     ASSERT_EQ(quantized_graph->operators()->size(), 1);
     const auto op = quantized_graph->operators()->Get(0);
     const uint32_t op_code_idx = op->opcode_index();
-    ASSERT_EQ(output_model->operator_codes()->Get(op_code_idx)->builtin_code(),
+    ASSERT_EQ(GetBuiltinCode(output_model->operator_codes()->Get(op_code_idx)),
               BuiltinOperator_CONV_2D);
     for (size_t i = 0; i < quantized_graph->tensors()->size(); i++) {
       const auto quant_tensor = quantized_graph->tensors()->Get(i);
@@ -231,9 +234,10 @@ TEST_F(QuantizeWeightsTest, HybridConv) {
 TEST_F(QuantizeWeightsTest, DequantizeConv) {
   LoadBasicModel();
   flatbuffers::FlatBufferBuilder builder;
-  auto status = internal::QuantizeWeights(&builder, model_, 0,
-                                          /*use_hybrid_evaluation=*/false);
-  EXPECT_EQ(status, kTfLiteOk);
+  ASSERT_TRUE(internal::QuantizeWeights(&builder, model_, 0,
+                                        /*use_hybrid_evaluation=*/false,
+                                        QuantizerType::OLD_QUANTIZER)
+                  .ok());
 
   const uint8_t* buffer = builder.GetBufferPointer();
   const Model* output_model = GetModel(buffer);
@@ -254,7 +258,7 @@ TEST_F(QuantizeWeightsTest, DequantizeConv) {
     for (size_t i = 0; i < quantized_graph->operators()->size(); ++i) {
       const auto op = quantized_graph->operators()->Get(i);
       const uint32_t op_code_idx = op->opcode_index();
-      if (output_model->operator_codes()->Get(op_code_idx)->builtin_code() ==
+      if (GetBuiltinCode(output_model->operator_codes()->Get(op_code_idx)) ==
           BuiltinOperator_DEQUANTIZE) {
         dequant_input_idx = op->inputs()->Get(0);
         dequant_output_idx = op->outputs()->Get(0);
@@ -290,9 +294,10 @@ TEST_F(QuantizeWeightsTest, DequantizeConv) {
 TEST_F(QuantizeWeightsTest, DequantizeConvFloat16) {
   LoadBasicModel();
   flatbuffers::FlatBufferBuilder builder;
-  auto status = tflite::optimize::QuantizeWeights(
-      &builder, model_, BufferType::QUANTIZED_FLOAT16);
-  EXPECT_EQ(status, kTfLiteOk);
+  ASSERT_TRUE(tflite::optimize::QuantizeWeights(
+                  &builder, model_, BufferType::QUANTIZED_FLOAT16,
+                  kUseUpdatedHybridSchemeDefault, QuantizerType::OLD_QUANTIZER)
+                  .ok());
 
   const uint8_t* buffer = builder.GetBufferPointer();
   const Model* output_model = GetModel(buffer);
@@ -313,7 +318,7 @@ TEST_F(QuantizeWeightsTest, DequantizeConvFloat16) {
     for (size_t i = 0; i < quantized_graph->operators()->size(); ++i) {
       const auto op = quantized_graph->operators()->Get(i);
       const uint32_t op_code_idx = op->opcode_index();
-      if (output_model->operator_codes()->Get(op_code_idx)->builtin_code() ==
+      if (GetBuiltinCode(output_model->operator_codes()->Get(op_code_idx)) ==
           BuiltinOperator_DEQUANTIZE) {
         dequant_input_idx = op->inputs()->Get(0);
         dequant_output_idx = op->outputs()->Get(0);
@@ -349,8 +354,8 @@ TEST_F(QuantizeWeightsTest, DequantizeConvFloat16) {
 TEST_F(QuantizeWeightsTest, SharedWeights_Hybrid) {
   LoadSharedWeightsModel();
   flatbuffers::FlatBufferBuilder builder;
-  auto status = QuantizeWeights(&builder, model_, 0);
-  EXPECT_EQ(status, kTfLiteOk);
+  ASSERT_TRUE(
+      QuantizeWeights(&builder, model_, 0, QuantizerType::OLD_QUANTIZER).ok());
 
   const uint8_t* buffer = builder.GetBufferPointer();
   const Model* output_model = GetModel(buffer);
@@ -365,7 +370,7 @@ TEST_F(QuantizeWeightsTest, SharedWeights_Hybrid) {
       const auto op = quantized_graph->operators()->Get(i);
       const uint32_t op_code_idx = op->opcode_index();
       const auto op_code =
-          output_model->operator_codes()->Get(op_code_idx)->builtin_code();
+          GetBuiltinCode(output_model->operator_codes()->Get(op_code_idx));
       if (op_code == BuiltinOperator_CONV_2D) {
         num_conv_ops++;
         // Ensure that each convolution's weights tensor is now INT8.
@@ -382,9 +387,10 @@ TEST_F(QuantizeWeightsTest, SharedWeights_Hybrid) {
 TEST_F(QuantizeWeightsTest, SharedWeights_Dequantize) {
   LoadSharedWeightsModel();
   flatbuffers::FlatBufferBuilder builder;
-  auto status = internal::QuantizeWeights(&builder, model_, 0,
-                                          /*use_hybrid_evaluation*/ false);
-  EXPECT_EQ(status, kTfLiteOk);
+  ASSERT_TRUE(internal::QuantizeWeights(&builder, model_, 0,
+                                        /*use_hybrid_evaluation*/ false,
+                                        QuantizerType::OLD_QUANTIZER)
+                  .ok());
 
   const uint8_t* buffer = builder.GetBufferPointer();
   const Model* output_model = GetModel(buffer);
@@ -399,7 +405,7 @@ TEST_F(QuantizeWeightsTest, SharedWeights_Dequantize) {
       const auto op = quantized_graph->operators()->Get(i);
       const uint32_t op_code_idx = op->opcode_index();
       const auto op_code =
-          output_model->operator_codes()->Get(op_code_idx)->builtin_code();
+          GetBuiltinCode(output_model->operator_codes()->Get(op_code_idx));
       if (op_code == BuiltinOperator_CONV_2D) {
         num_conv_ops++;
         // Ensure that each convolution's weights tensor is still FLOAT
@@ -424,8 +430,8 @@ TEST_F(QuantizeWeightsTest, SharedWeights_Dequantize) {
 TEST_F(QuantizeWeightsTest, VerifyGatherQuantization) {
   LoadGatherTestModel();
   flatbuffers::FlatBufferBuilder builder;
-  auto status = QuantizeWeights(&builder, model_, 0);
-  EXPECT_EQ(status, kTfLiteOk);
+  ASSERT_TRUE(
+      QuantizeWeights(&builder, model_, 0, QuantizerType::OLD_QUANTIZER).ok());
 
   const uint8_t* buffer = builder.GetBufferPointer();
   const Model* output_model = GetModel(buffer);
@@ -439,7 +445,7 @@ TEST_F(QuantizeWeightsTest, VerifyGatherQuantization) {
       const auto op = quantized_graph->operators()->Get(i);
       const uint32_t op_code_idx = op->opcode_index();
       const auto op_code =
-          output_model->operator_codes()->Get(op_code_idx)->builtin_code();
+          GetBuiltinCode(output_model->operator_codes()->Get(op_code_idx));
       if (op_code == BuiltinOperator_GATHER) {
         uint32_t input_tensor_index = op->inputs()->Get(0);
         const auto weights_tensor =
@@ -462,8 +468,9 @@ TEST_F(QuantizeWeightsTest, VerifyCustomOpQuantizationDequantize) {
   };
 
   flatbuffers::FlatBufferBuilder builder;
-  auto status = QuantizeWeights(&builder, model_, 0, custom_op_map);
-  ASSERT_EQ(status, kTfLiteOk);
+  ASSERT_TRUE(QuantizeWeights(&builder, model_, 0, custom_op_map,
+                              QuantizerType::OLD_QUANTIZER)
+                  .ok());
 
   const uint8_t* buffer = builder.GetBufferPointer();
   const Model* output_model = GetModel(buffer);
@@ -479,7 +486,7 @@ TEST_F(QuantizeWeightsTest, VerifyCustomOpQuantizationDequantize) {
     const auto op = quantized_graph->operators()->Get(i);
     const uint32_t op_code_idx = op->opcode_index();
     const auto op_code =
-        output_model->operator_codes()->Get(op_code_idx)->builtin_code();
+        GetBuiltinCode(output_model->operator_codes()->Get(op_code_idx));
     if (op_code == BuiltinOperator_CUSTOM) {
       uint32_t weights_tensor_index = op->inputs()->Get(1);
       const auto weights_tensor =
@@ -509,8 +516,9 @@ TEST_F(QuantizeWeightsTest, VerifyCustomOpQuantizationHybrid) {
   };
 
   flatbuffers::FlatBufferBuilder builder;
-  auto status = QuantizeWeights(&builder, model_, 0, custom_op_map);
-  ASSERT_EQ(status, kTfLiteOk);
+  ASSERT_TRUE(QuantizeWeights(&builder, model_, 0, custom_op_map,
+                              QuantizerType::OLD_QUANTIZER)
+                  .ok());
 
   const uint8_t* buffer = builder.GetBufferPointer();
   const Model* output_model = GetModel(buffer);
@@ -525,7 +533,7 @@ TEST_F(QuantizeWeightsTest, VerifyCustomOpQuantizationHybrid) {
     const auto op = quantized_graph->operators()->Get(i);
     const uint32_t op_code_idx = op->opcode_index();
     const auto op_code =
-        output_model->operator_codes()->Get(op_code_idx)->builtin_code();
+        GetBuiltinCode(output_model->operator_codes()->Get(op_code_idx));
     if (op_code == BuiltinOperator_CUSTOM) {
       uint32_t weights_tensor_index = op->inputs()->Get(1);
       const auto weights_tensor =
@@ -541,8 +549,10 @@ TEST_F(QuantizeWeightsTest, VerifyUpdatedHybridSchemeFalseQuantizationHybrid) {
   LoadBasicModel();
   flatbuffers::FlatBufferBuilder builder;
   const CustomOpMap custom_op_map;
-  auto status = QuantizeWeights(&builder, model_, 0, custom_op_map, false);
-  EXPECT_EQ(status, kTfLiteOk);
+  ASSERT_TRUE(QuantizeWeights(&builder, model_, 0, custom_op_map,
+                              /*use_updated_hybrid_scheme=*/false,
+                              /*op_denylist=*/{}, QuantizerType::OLD_QUANTIZER)
+                  .ok());
 
   const uint8_t* buffer = builder.GetBufferPointer();
   const Model* output_model = GetModel(buffer);
@@ -560,7 +570,7 @@ TEST_F(QuantizeWeightsTest, VerifyUpdatedHybridSchemeFalseQuantizationHybrid) {
     ASSERT_EQ(quantized_graph->operators()->size(), 1);
     const auto op = quantized_graph->operators()->Get(0);
     const uint32_t op_code_idx = op->opcode_index();
-    ASSERT_EQ(output_model->operator_codes()->Get(op_code_idx)->builtin_code(),
+    ASSERT_EQ(GetBuiltinCode(output_model->operator_codes()->Get(op_code_idx)),
               BuiltinOperator_CONV_2D);
     for (size_t i = 0; i < quantized_graph->tensors()->size(); i++) {
       const auto quant_tensor = quantized_graph->tensors()->Get(i);
@@ -582,6 +592,71 @@ TEST_F(QuantizeWeightsTest, VerifyUpdatedHybridSchemeFalseQuantizationHybrid) {
             << quant_tensor->name()->str();
         auto shape = GetAsVector(quant_tensor->shape());
         EXPECT_EQ(quant_tensor->quantization()->scale()->size(), 1);
+      } else {
+        EXPECT_EQ(quant_tensor->type(), TensorType_FLOAT32);
+      }
+    }
+  }
+}
+
+TEST_F(QuantizeWeightsTest, DequantizeConvBlocklisted) {
+  LoadBasicModel();
+  flatbuffers::FlatBufferBuilder builder;
+  const CustomOpMap custom_op_map;
+  ASSERT_TRUE(QuantizeWeights(&builder, model_, 0, custom_op_map,
+                              /*use_updated_hybrid_scheme=*/true,
+                              /*op_denylist*/ {BuiltinOperator_CONV_2D},
+                              QuantizerType::OLD_QUANTIZER)
+                  .ok());
+
+  const uint8_t* buffer = builder.GetBufferPointer();
+  const Model* output_model = GetModel(buffer);
+  ASSERT_TRUE(output_model);
+
+  ASSERT_EQ(output_model->subgraphs()->size(), model_->subgraphs()->size());
+  for (size_t subgraph_idx = 0; subgraph_idx < model_->subgraphs()->size();
+       ++subgraph_idx) {
+    const auto quantized_graph = output_model->subgraphs()->Get(subgraph_idx);
+    const auto float_graph = model_->subgraphs()->Get(subgraph_idx);
+    // The output graph should have an extra tensor from the added dequantize
+    // op.
+    ASSERT_EQ(quantized_graph->tensors()->size(),
+              float_graph->tensors()->size() + 1);
+    // Check that a dequantize op exists.
+    int32_t dequant_input_idx = -1;
+    int32_t dequant_output_idx = -1;
+    for (size_t i = 0; i < quantized_graph->operators()->size(); ++i) {
+      const auto op = quantized_graph->operators()->Get(i);
+      const uint32_t op_code_idx = op->opcode_index();
+      if (GetBuiltinCode(output_model->operator_codes()->Get(op_code_idx)) ==
+          BuiltinOperator_DEQUANTIZE) {
+        dequant_input_idx = op->inputs()->Get(0);
+        dequant_output_idx = op->outputs()->Get(0);
+      }
+    }
+    ASSERT_GT(dequant_input_idx, -1);
+    ASSERT_GT(dequant_output_idx, -1);
+    for (size_t i = 0; i < quantized_graph->tensors()->size(); ++i) {
+      const auto quant_tensor = quantized_graph->tensors()->Get(i);
+      // If the tensor is a weight, it should have type INT8.
+      // If the tensor is a bias, it should have type FLOAT32.
+      // If the tensor is an input or output it should have type FLOAT32.
+      // The input to dequantize should be INT8, and all other tensors should be
+      // FLOAT32.
+      if (i == dequant_input_idx) {
+        EXPECT_EQ(quant_tensor->type(), TensorType_INT8);
+        // The dequantize should still be quantized per-channel
+        EXPECT_EQ(quant_tensor->quantization()->scale()->size(), 5);
+        EXPECT_EQ(quant_tensor->quantization()->quantized_dimension(), 0);
+      } else if (i == dequant_output_idx) {
+        EXPECT_EQ(quant_tensor->type(), TensorType_FLOAT32);
+      } else if (IsModelInputOrOutput(output_model, i)) {
+        EXPECT_EQ(quant_tensor->type(), TensorType_FLOAT32);
+      } else if (quant_tensor->name()->str() == "conv_bias") {
+        EXPECT_EQ(quant_tensor->type(), TensorType_FLOAT32);
+      } else if (quant_tensor->buffer() != 0) {
+        // If it's a non-bias constant tensor, it must be the weight.
+        EXPECT_EQ(quant_tensor->type(), TensorType_INT8);
       } else {
         EXPECT_EQ(quant_tensor->type(), TensorType_FLOAT32);
       }

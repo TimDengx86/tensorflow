@@ -14,11 +14,17 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/core/kernels/data/experimental/assert_cardinality_dataset_op.h"
 
-#include <map>
+#include <cstdint>
+#include <vector>
 
-#include "tensorflow/core/framework/partial_tensor_shape.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "tensorflow/core/data/name_utils.h"
+#include "tensorflow/core/framework/dataset.h"
 #include "tensorflow/core/framework/tensor.h"
-#include "tensorflow/core/kernels/data/name_utils.h"
+#include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/platform/errors.h"
+#include "tsl/platform/errors.h"
 
 namespace tensorflow {
 namespace data {
@@ -37,7 +43,7 @@ namespace experimental {
 
 class AssertCardinalityDatasetOp::Dataset : public DatasetBase {
  public:
-  Dataset(OpKernelContext* ctx, const DatasetBase* input, int64 cardinality,
+  Dataset(OpKernelContext* ctx, const DatasetBase* input, int64_t cardinality,
           const DataTypeVector& output_types,
           const std::vector<PartialTensorShape>& output_shapes)
       : DatasetBase(DatasetContext(ctx)),
@@ -46,13 +52,17 @@ class AssertCardinalityDatasetOp::Dataset : public DatasetBase {
         output_types_(output_types),
         output_shapes_(output_shapes) {
     input_->Ref();
+    random_indexing_compatible_ = absl::OkStatus();
+    if (input_ != nullptr) {
+      random_indexing_compatible_ = input_->RandomIndexingCompatible();
+    }
   }
 
   ~Dataset() override { input_->Unref(); }
 
   std::unique_ptr<IteratorBase> MakeIteratorInternal(
       const string& prefix) const override {
-    return absl::make_unique<Iterator>(Iterator::Params{
+    return std::make_unique<Iterator>(Iterator::Params{
         this, name_utils::IteratorPrefix(kDatasetType, prefix)});
   }
 
@@ -65,10 +75,31 @@ class AssertCardinalityDatasetOp::Dataset : public DatasetBase {
     return name_utils::DatasetDebugString(kDatasetType);
   }
 
-  int64 Cardinality() const override { return cardinality_; }
+  int64_t CardinalityInternal(CardinalityOptions options) const override {
+    return cardinality_;
+  }
+
+  Status InputDatasets(std::vector<const DatasetBase*>* inputs) const override {
+    inputs->push_back(input_);
+    return absl::OkStatus();
+  }
 
   Status CheckExternalState() const override {
     return input_->CheckExternalState();
+  }
+
+  absl::Status RandomIndexingCompatible() const override {
+    return random_indexing_compatible_;
+  }
+
+  absl::Status Get(OpKernelContext* ctx, int64_t index,
+                   std::vector<Tensor>* out_tensors) const override {
+    return GetInternal(ctx, index, out_tensors);
+  }
+
+  absl::Status Get(AnyContext ctx, int64_t index,
+                   std::vector<Tensor>* out_tensors) const override {
+    return GetInternal(ctx, index, out_tensors);
   }
 
  protected:
@@ -81,7 +112,7 @@ class AssertCardinalityDatasetOp::Dataset : public DatasetBase {
     TF_RETURN_IF_ERROR(b->AddScalar(cardinality_, &cardinality_node));
     TF_RETURN_IF_ERROR(
         b->AddDataset(this, {input_graph_node, cardinality_node}, output));
-    return Status::OK();
+    return absl::OkStatus();
   }
 
  private:
@@ -89,6 +120,8 @@ class AssertCardinalityDatasetOp::Dataset : public DatasetBase {
    public:
     explicit Iterator(const Params& params)
         : DatasetIterator<Dataset>(params), num_elements_(0) {}
+
+    bool SymbolicCheckpointCompatible() const override { return true; }
 
     Status Initialize(IteratorContext* ctx) override {
       return dataset()->input_->MakeIterator(ctx, this, prefix(), &input_impl_);
@@ -103,18 +136,24 @@ class AssertCardinalityDatasetOp::Dataset : public DatasetBase {
         num_elements_++;
       }
       if (*end_of_sequence && num_elements_ != dataset()->cardinality_) {
+        if (ctx->index_mapper()) {
+          return absl::FailedPreconditionError(
+              absl::StrCat("Input dataset was expected to contain ",
+                           ElementString(dataset()->cardinality_), "."));
+        }
         return errors::FailedPrecondition(
             "Input dataset was expected to contain ",
             ElementString(dataset()->cardinality_), " but contained only ",
             ElementString(num_elements_), ".");
       }
-      if (num_elements_ > dataset()->cardinality_) {
+      if (dataset()->cardinality_ != kInfiniteCardinality &&
+          num_elements_ > dataset()->cardinality_) {
         return errors::FailedPrecondition(
             "Input dataset was expected to contain ",
             ElementString(dataset()->cardinality_), " but contained at least ",
             ElementString(num_elements_), ".");
       }
-      return Status::OK();
+      return absl::OkStatus();
     }
 
    protected:
@@ -129,30 +168,57 @@ class AssertCardinalityDatasetOp::Dataset : public DatasetBase {
       TF_RETURN_IF_ERROR(
           writer->WriteScalar(full_name("num_elements"), num_elements_));
       TF_RETURN_IF_ERROR(SaveInput(ctx, writer, input_impl_));
-      return Status::OK();
+      return absl::OkStatus();
     }
 
     Status RestoreInternal(IteratorContext* ctx,
                            IteratorStateReader* reader) override {
       TF_RETURN_IF_ERROR(
           reader->ReadScalar(full_name("num_elements"), &num_elements_));
-      TF_RETURN_IF_ERROR(RestoreInput(ctx, reader, input_impl_));
-      return Status::OK();
+      return RestoreInput(ctx, reader, input_impl_);
     }
 
    private:
-    static string ElementString(int64 n) {
-      return strings::StrCat(n, " element", n != 1 ? "s" : "");
-    }
-
     std::unique_ptr<IteratorBase> input_impl_;
-    int64 num_elements_;
+    int64_t num_elements_;
   };
 
+  static string ElementString(int64_t n) {
+    if (n == kInfiniteCardinality) {
+      return absl::StrCat("an infinite number of elements");
+    }
+    return absl::StrCat(n, " element", n != 1 ? "s" : "");
+  }
+
+  template <typename Ctx>
+  absl::Status GetInternal(Ctx&& ctx, int64_t index,
+                           std::vector<Tensor>* out_tensors) const {
+    if (index < 0) {
+      return absl::OutOfRangeError(
+          absl::StrCat("Dataset index ", index, " must be non-negative"));
+    }
+    if (cardinality_ != kInfiniteCardinality && index >= cardinality_) {
+      return absl::OutOfRangeError(absl::StrCat(
+          "Index ", index, " greater than dataset size ", cardinality_));
+    }
+
+    absl::Status result =
+        input_->Get(std::forward<Ctx>(ctx), index, out_tensors);
+
+    if (absl::IsOutOfRange(result)) {
+      return absl::FailedPreconditionError(absl::StrCat(
+          "Input dataset was expected to contain ", ElementString(cardinality_),
+          " but index ", index, " could not be retrieved: ", result.message()));
+    }
+
+    return result;
+  }
+
   const DatasetBase* input_;
-  const int64 cardinality_;
+  const int64_t cardinality_;
   const DataTypeVector output_types_;
   const std::vector<PartialTensorShape> output_shapes_;
+  absl::Status random_indexing_compatible_;
 };
 
 AssertCardinalityDatasetOp::AssertCardinalityDatasetOp(
@@ -165,9 +231,9 @@ AssertCardinalityDatasetOp::AssertCardinalityDatasetOp(
 void AssertCardinalityDatasetOp::MakeDataset(OpKernelContext* ctx,
                                              DatasetBase* input,
                                              DatasetBase** output) {
-  int64 cardinality;
+  int64_t cardinality;
   OP_REQUIRES_OK(ctx,
-                 ParseScalarArgument<int64>(ctx, kCardinality, &cardinality));
+                 ParseScalarArgument<int64_t>(ctx, kCardinality, &cardinality));
   *output = new Dataset(ctx, input, cardinality, output_types_, output_shapes_);
 }
 

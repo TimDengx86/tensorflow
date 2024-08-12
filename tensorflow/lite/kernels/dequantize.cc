@@ -16,7 +16,7 @@ limitations under the License.
 
 #include <stddef.h>
 
-#include "tensorflow/lite/c/common.h"
+#include "tensorflow/lite/core/c/common.h"
 #include "tensorflow/lite/kernels/internal/optimized/neon_check.h"
 #include "tensorflow/lite/kernels/kernel_util.h"
 
@@ -55,10 +55,15 @@ TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
 
   OpContext op_context(context, node);
 
-  TF_LITE_ENSURE(context, op_context.input->type == kTfLiteUInt8 ||
+  TF_LITE_ENSURE(context, op_context.input->type == kTfLiteInt4 ||
+                              op_context.input->type == kTfLiteUInt8 ||
                               op_context.input->type == kTfLiteInt8 ||
                               op_context.input->type == kTfLiteInt16 ||
                               op_context.input->type == kTfLiteFloat16);
+
+  if (op_context.input->type == kTfLiteInt16) {
+    TF_LITE_ENSURE_EQ(context, op_context.input->params.zero_point, 0);
+  }
 
   op_context.output->type = kTfLiteFloat32;
   // If the input tensor is constant, we can persist the dequantized value in

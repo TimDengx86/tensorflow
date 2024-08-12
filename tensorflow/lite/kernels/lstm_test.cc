@@ -25,7 +25,7 @@ limitations under the License.
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "flatbuffers/flatbuffers.h"  // from @flatbuffers
-#include "tensorflow/lite/interpreter.h"
+#include "tensorflow/lite/core/interpreter.h"
 #include "tensorflow/lite/kernels/test_util.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 
@@ -101,8 +101,8 @@ class LSTMOpModel : public SingleOpModel {
     }
 
     // Adding the 2 state tensors.
-    AddInput({TensorType_FLOAT32, {n_batch, n_output}}, true);
-    AddInput({TensorType_FLOAT32, {n_batch, n_cell}}, true);
+    AddVariableInput({TensorType_FLOAT32, {n_batch, n_output}});
+    AddVariableInput({TensorType_FLOAT32, {n_batch, n_cell}});
 
     // Layer norm weights.
     if (!model_has_legacy_20_inputs) {
@@ -361,7 +361,7 @@ class LstmOpTest
         lstm->SetInput(b * num_inputs, batch_start, batch_end);
       }
 
-      lstm->Invoke();
+      ASSERT_EQ(lstm->Invoke(), kTfLiteOk);
 
       std::vector<float> expected;
       ASSERT_EQ(num_batches, lstm_golden_output_[i].size());
@@ -1304,7 +1304,7 @@ TEST_P(LstmOpTest, Cifg_Peephole_Projection_LayerNorm) {
 
   static const auto* tolerance_per_type =
       new std::map<TensorType, float>{{TensorType_FLOAT32, 0.00001f},
-                                      {TensorType_UINT8, 0.000971057f},
+                                      {TensorType_UINT8, 0.001f},
                                       {TensorType_INT8, 0.001f}};
   VerifyGoldens(&lstm, tolerance_per_type->at(weight_type));
 }
@@ -1412,16 +1412,14 @@ class LSTMIntegerOpModel : public SingleOpModel {
     }
 
     // Adding the 2 state tensors.
-    AddInput({TensorType_INT16,
-              {n_batch, n_output},
-              ranges[18].first,
-              ranges[18].second},
-             true);
-    AddInput({TensorType_INT16,
-              {n_batch, n_cell},
-              ranges[19].first,
-              ranges[19].second},
-             true);
+    AddVariableInput({TensorType_INT16,
+                      {n_batch, n_output},
+                      ranges[18].first,
+                      ranges[18].second});
+    AddVariableInput({TensorType_INT16,
+                      {n_batch, n_cell},
+                      ranges[19].first,
+                      ranges[19].second});
 
     // Layer norm weights.
     if (use_layer_norm) {
@@ -1460,8 +1458,12 @@ class LSTMIntegerOpModel : public SingleOpModel {
         BuiltinOperator_LSTM, BuiltinOptions_LSTMOptions,
         CreateLSTMOptions(builder_, ActivationFunctionType_TANH).Union());
 
-    BuildInterpreter({});  // Input sizes are already set
+    BuildInterpreter(/*input_shapes=*/{}, /*num_threads=*/-1,
+                     /*allow_fp32_relax_to_fp16=*/false,
+                     /*apply_delegate=*/true, /*allocate_and_delegate=*/false);
   }
+
+  void PerformAllocateAndDelegate() { AllocateAndDelegate(true); }
 
   void SetInputToInputWeights(const std::vector<float>& f) {
     QuantizeAndPopulate<int8_t>(input_to_input_weights_, f);
@@ -1694,6 +1696,8 @@ TEST(IntegerLstmOpTest, NoCifg_NoPeephole_Projection_LayerNorm) {
                           /*use_layer_norm=*/true,
                           /*use_8x8_8_implementation=*/false, ranges,
                           intermediates);
+  // Do allocate.
+  lstm.PerformAllocateAndDelegate();
 
   // Set weights.
   lstm.SetInputToInputWeights(input_to_input_weights);
@@ -1746,7 +1750,7 @@ TEST(IntegerLstmOpTest, NoCifg_NoPeephole_Projection_LayerNorm) {
   EXPECT_GT(input_sequence_size, 0);
   for (int i = 0; i < input_sequence_size; ++i) {
     lstm.SetInput(lstm_input[i]);
-    lstm.Invoke();
+    ASSERT_EQ(lstm.Invoke(), kTfLiteOk);
     EXPECT_THAT(lstm.GetOutput(), ElementsAreArray(expected_output[i]));
   }
 }
@@ -1861,6 +1865,9 @@ TEST(IntegerLstmOpTest, NoCifg_Peephole_Projection_LayerNorm) {
                           /*use_8x8_8_implementation=*/false, ranges,
                           intermediates);
 
+  // Do allocate.
+  lstm.PerformAllocateAndDelegate();
+
   // Set weights.
   lstm.SetInputToInputWeights(input_to_input_weights);
   lstm.SetInputToCellWeights(input_to_cell_weights);
@@ -1916,7 +1923,7 @@ TEST(IntegerLstmOpTest, NoCifg_Peephole_Projection_LayerNorm) {
   EXPECT_GT(input_sequence_size, 0);
   for (int i = 0; i < input_sequence_size; ++i) {
     lstm.SetInput(lstm_input[i]);
-    lstm.Invoke();
+    ASSERT_EQ(lstm.Invoke(), kTfLiteOk);
     EXPECT_THAT(lstm.GetOutput(), ElementsAreArray(expected_output[i]));
   }
 }
@@ -2028,6 +2035,9 @@ TEST(IntegerLstmOpTest, Cifg_NoPeephole_Projection_LayerNorm_8x8_8) {
                           /*use_8x8_8_implementation=*/true, ranges,
                           intermediates);
 
+  // Do allocate.
+  lstm.PerformAllocateAndDelegate();
+
   // Set weights.
   // lstm.SetInputToInputWeights(input_to_input_weights);
   lstm.SetInputToCellWeights(input_to_cell_weights);
@@ -2080,12 +2090,12 @@ TEST(IntegerLstmOpTest, Cifg_NoPeephole_Projection_LayerNorm_8x8_8) {
   EXPECT_GT(input_sequence_size, 0);
   for (int i = 0; i < input_sequence_size; ++i) {
     lstm.SetInput(lstm_input[i]);
-    lstm.Invoke();
+    ASSERT_EQ(lstm.Invoke(), kTfLiteOk);
     EXPECT_THAT(lstm.GetOutput(), ElementsAreArray(expected_output[i]));
   }
 }
 
-#ifdef GTEST_HAS_DEATH_TEST
+#if GTEST_HAS_DEATH_TEST
 TEST(LstmOpTest, InvalidTypes) {
   const int n_batch = 1;
   const int n_input = 2;
@@ -2204,12 +2214,10 @@ class HybridSparseLSTMOpModel : public ::tflite::SingleOpModel {
     }
 
     // Adding the 2 state tensors.
-    output_state_ = AddInput(::tflite::TensorData{::tflite::TensorType_FLOAT32,
-                                                  {n_output_ * n_batch_}},
-                             true);
-    cell_state_ = AddInput(::tflite::TensorData{::tflite::TensorType_FLOAT32,
-                                                {n_cell_ * n_batch_}},
-                           true);
+    output_state_ = AddVariableInput(::tflite::TensorData{
+        ::tflite::TensorType_FLOAT32, {n_output_ * n_batch_}});
+    cell_state_ = AddVariableInput(::tflite::TensorData{
+        ::tflite::TensorType_FLOAT32, {n_cell_ * n_batch_}});
 
     if (use_cifg) {
       input_layer_norm_weights_ = AddNullInput();
@@ -2396,7 +2404,7 @@ class BaseSparseLstmTest : public ::testing::Test {
             b * sparse_layer_norm_lstm->num_inputs(), batch_start, batch_end);
       }
 
-      sparse_layer_norm_lstm->Invoke();
+      ASSERT_EQ(sparse_layer_norm_lstm->Invoke(), kTfLiteOk);
 
       const int num_outputs = sparse_layer_norm_lstm->num_outputs();
       std::vector<float> expected;
@@ -2599,8 +2607,6 @@ class NoCifgPeepholeProjectionNoClippingSparseLstmTest
       0.0, 0.0, 0.0, 0.0,     // 14th row
       0.0, 0.0, 0.0, 0.0,     // 15th row
       0.0, 0.0, 0.0, 0.0,     // 16th row
-      0.0, 0.0, 0.0, 0.0,     // 17th row
-      0.0, 0.0, 0.0, 0.0,     // 18th row
     };
 
     sparse_layer_norm_lstm_input_ = {
@@ -2710,16 +2716,16 @@ TEST_F(NoCifgPeepholeProjectionNoClippingSparseLstmTest,
   const std::vector<std::vector<float>> sparse_layer_norm_lstm_golden_output = {
     {
       // Batch0: 2 (input_sequence_size) * 3 (n_output_)
-      0.0550758, 0.138464, -0.0628034, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+      0.0559981, 0.140761, -0.0618812, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
       0.0, 0.0, 0.0, 0.0, 0.0,
-      0.069672, 0.195428, -0.0605584, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+      0.070831, 0.200455, -0.0581763, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
       0.0, 0.0, 0.0, 0.0, 0.0,
     },
     {
       // Batch1: 3 (input_sequence_size) * 3 (n_output_)
-      0.0550758, 0.138464, -0.0628034, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+      0.0559981, 0.140761, -0.0618812, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
       0.0, 0.0, 0.0, 0.0, 0.0,
-      0.069672, 0.195428, -0.0605584, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+      0.070831, 0.200455, -0.0581763, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
       0.0, 0.0, 0.0, 0.0, 0.0,
     }};
   /* clang-format on */
@@ -2732,7 +2738,7 @@ TEST_F(NoCifgPeepholeProjectionNoClippingSparseLstmTest,
 INSTANTIATE_TEST_SUITE_P(
     Parameterized, LstmOpTest,
     ::testing::Combine(::testing::Values(TensorType_FLOAT32, TensorType_UINT8,
-                                         TensorType_UINT8),
+                                         TensorType_INT8),
                        ::testing::Bool(), ::testing::Bool()));
 
 }  // namespace

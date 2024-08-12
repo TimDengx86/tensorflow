@@ -23,12 +23,17 @@ limitations under the License.
 
 #include "absl/container/flat_hash_set.h"
 #include "absl/container/node_hash_map.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/strings/match.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "tensorflow/core/framework/graph.pb.h"
 #include "tensorflow/core/framework/node_def.pb.h"
+#include "tensorflow/core/framework/node_def_util.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/types.h"
+#include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/graph/tensor_id.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/lib/core/stringpiece.h"
@@ -221,12 +226,26 @@ class NodeMapInternal {
 
  private:
   // Helper method to get the NodeDef pointer of i-th node in a graph.
-  NodeDefT* GetNodeDefFromGraph(GraphDefT* graph, int64 i) const;
+  inline NodeDefT* GetNodeDefFromGraph(GraphDefT* graph, int64_t i) const;
 
   const absl::flat_hash_set<NodeDefT*> empty_set_;
   absl::node_hash_map<string, NodeDefT*> nodes_;
   absl::node_hash_map<string, absl::flat_hash_set<NodeDefT*>> outputs_;
 };
+
+// Specialized template class method GetNodeDefFromGraph.
+template <>
+inline NodeDef* NodeMapInternal<GraphDef, NodeDef>::GetNodeDefFromGraph(
+    GraphDef* graph, int64_t i) const {
+  return graph->mutable_node(i);
+}
+
+template <>
+inline const NodeDef*
+NodeMapInternal<const GraphDef, const NodeDef>::GetNodeDefFromGraph(
+    const GraphDef* graph, int64_t i) const {
+  return &graph->node(i);
+}
 }  // namespace internal
 
 // A utility class to lookup a node and its outputs by node name.
@@ -268,7 +287,7 @@ class SetVector {
 
   bool Empty() const { return vector_.empty(); }
 
-  void Reserve(int64 size) { vector_.reserve(size); }
+  void Reserve(int64_t size) { vector_.reserve(size); }
 
  private:
   gtl::FlatSet<T, Hash> set_;
@@ -285,7 +304,7 @@ string SafeTensorIdToString(const SafeTensorId& tensor_id);
 
 // True iff 'name' refers to a control inputs, i.e. a node name prefixed with
 // the ^ character.
-bool IsControlInput(const string& name);
+bool IsControlInput(absl::string_view name);
 
 // True iff tensor index refers to a control input.
 bool IsControlInput(const TensorId& tensor_id);
@@ -307,7 +326,7 @@ string AddPrefixToNodeName(const string& name, const string& prefix);
 // If returning false, the 'fn' may still continue to execute in the
 // thread-pool. It is the responsibility of the caller to reset the thread-pool
 // as appropriate.
-bool ExecuteWithTimeout(std::function<void()> fn, int64 timeout_in_ms,
+bool ExecuteWithTimeout(std::function<void()> fn, int64_t timeout_in_ms,
                         thread::ThreadPool* thread_pool);
 
 // Returns the node name prefixed with conventional symbol '^'
@@ -386,7 +405,7 @@ NodeDef* GetTailOfChain(const NodeDef& source, const NodeMap& node_map,
 void PermuteNodesInPlace(GraphDef* graph, std::vector<int>* permutation,
                          bool invert_permutation);
 
-// Returns Status::OK() if a kernel is registered for node.op() on the device
+// Returns OkStatus() if a kernel is registered for node.op() on the device
 // type corresponding to node.device().
 Status IsKernelRegisteredForNode(
     absl::string_view node_name, bool has_experimental_debug_info,

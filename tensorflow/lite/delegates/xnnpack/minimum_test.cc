@@ -19,8 +19,10 @@ limitations under the License.
 #include <random>
 
 #include <gtest/gtest.h>
+#include "tensorflow/lite/c/c_api_types.h"
 #include "tensorflow/lite/delegates/xnnpack/binary_elementwise_tester.h"
 #include "tensorflow/lite/delegates/xnnpack/xnnpack_delegate.h"
+#include "tensorflow/lite/schema/schema_generated.h"
 
 namespace tflite {
 namespace xnnpack {
@@ -705,6 +707,64 @@ TEST(Minimum, FP16Weights) {
       .Input2Shape({batch, height, width, channels})
       .Input2Static(true)
       .FP16Weights()
+      .Test(BuiltinOperator_MINIMUM, xnnpack_delegate.get());
+}
+
+TEST(Minimum, INT8Weights) {
+  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
+      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
+                       TfLiteXNNPackDelegateDelete);
+
+  std::random_device random_device;
+  auto rng = std::mt19937(random_device());
+  auto shape_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(2, 5), std::ref(rng));
+  const auto batch = shape_rng();
+  const auto height = shape_rng();
+  const auto width = shape_rng();
+  const auto channels = shape_rng();
+
+  BinaryElementwiseTester()
+      .Input1Shape({batch, height, width, channels})
+      .Input2Shape({batch, height, width, channels})
+      .Input1Static(true)
+      .INT8Weights()
+      .Test(BuiltinOperator_MINIMUM, xnnpack_delegate.get());
+
+  BinaryElementwiseTester()
+      .Input1Shape({batch, height, width, channels})
+      .Input2Shape({batch, height, width, channels})
+      .Input2Static(true)
+      .INT8Weights()
+      .Test(BuiltinOperator_MINIMUM, xnnpack_delegate.get());
+}
+
+TEST(Minimum, INT8ChannelWiseWeights) {
+  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
+      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
+                       TfLiteXNNPackDelegateDelete);
+
+  std::random_device random_device;
+  auto rng = std::mt19937(random_device());
+  auto shape_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(2, 5), std::ref(rng));
+  const auto batch = shape_rng();
+  const auto height = shape_rng();
+  const auto width = shape_rng();
+  const auto channels = shape_rng();
+
+  BinaryElementwiseTester()
+      .Input1Shape({batch, height, width, channels})
+      .Input2Shape({batch, height, width, channels})
+      .Input1Static(true)
+      .INT8ChannelWiseWeights()
+      .Test(BuiltinOperator_MINIMUM, xnnpack_delegate.get());
+
+  BinaryElementwiseTester()
+      .Input1Shape({batch, height, width, channels})
+      .Input2Shape({batch, height, width, channels})
+      .Input2Static(true)
+      .INT8ChannelWiseWeights()
       .Test(BuiltinOperator_MINIMUM, xnnpack_delegate.get());
 }
 

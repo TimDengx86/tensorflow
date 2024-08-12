@@ -17,7 +17,9 @@ limitations under the License.
 #define TENSORFLOW_CORE_DISTRIBUTED_RUNTIME_EAGER_REMOTE_MGR_H_
 
 #include <unordered_map>
+#include <vector>
 
+#include "absl/strings/string_view.h"
 #include "tensorflow/core/common_runtime/eager/eager_executor.h"
 #include "tensorflow/core/common_runtime/eager/tensor_handle.h"
 #include "tensorflow/core/distributed_runtime/eager/remote_tensor_handle.h"
@@ -25,8 +27,6 @@ limitations under the License.
 
 namespace tensorflow {
 namespace eager {
-
-const int64 kInvalidRemoteOpId = -1;
 
 // This class manages the states required to setup an eager cluster.
 // TODO(fishx): Move remote state from context to this class.
@@ -44,11 +44,11 @@ class RemoteMgr {
   bool IsMaster() { return is_master_; }
 
   void AddOperationOutputs(
-      const gtl::ArraySlice<tensorflow::TensorHandle*> handles,
-      int64 operation_id);
+      const absl::Span<tensorflow::TensorHandle* const> handles,
+      int64_t operation_id);
 
-  void AddOperationOutput(tensorflow::TensorHandle* handles, int64 operation_id,
-                          int32 output_num);
+  void AddOperationOutput(tensorflow::TensorHandle* handles,
+                          int64_t operation_id, int32_t output_num);
 
   Status GetTensorHandle(const RemoteTensorHandleInternal& remote_handle,
                          tensorflow::TensorHandle** handle);
@@ -68,7 +68,7 @@ class RemoteMgr {
   // remote worker.
   Status SerializeRemoteTensorHandle(
       TensorHandle* in, const bool wait_until_ready, RemoteTensorHandle* out,
-      Device* device, const string& device_name,
+      Device* device, absl::string_view device_name = "",
       const bool serialize_resource_dtype_and_shape = false);
 
   // Deserialize a RemoteTensorHandle to a TensorHandle(local/remote).
@@ -88,7 +88,7 @@ class RemoteMgr {
   // Returns the op_id and output_num if the given local TensorHandle exists in
   // remote_tensor_handle_map_.
   Status GetRemoteTensorHandle(const tensorflow::TensorHandle* handle,
-                               const bool wait_until_ready, int64* op_id,
+                               const bool wait_until_ready, int64_t* op_id,
                                int32* output_num)
       TF_SHARED_LOCKS_REQUIRED(remote_tensor_handle_mu_);
 

@@ -2,9 +2,11 @@
 # Will be moved in proper place once all filesystems are converted to the
 # modular framework.
 load("//tensorflow:tensorflow.bzl", "tf_cc_test")
+load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
 
 package(
-    licenses = ["notice"],  # Apache 2.0
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
+    licenses = ["notice"],
 )
 
 # This is only for plugins
@@ -29,17 +31,17 @@ cc_library(
         "modular_filesystem.h",
         "modular_filesystem_registration.h",
     ],
-    # TODO(mihaimaruseac): Visibility should be more restrictive once we
+    # TODO(b/139060984): Visibility should be more restrictive once we
     # convert to modular filesystems everywhere
     visibility = ["//visibility:public"],
     deps = [
         ":filesystem_interface",
         "//tensorflow/c:tf_status_helper",
         "//tensorflow/c:tf_status_internal",
-        "//tensorflow/core:ptr_util",
         "//tensorflow/core/platform:env",
         "//tensorflow/core/platform:errors",
         "//tensorflow/core/platform:status",
+        "@local_tsl//tsl/platform:errors",
     ],
 )
 
@@ -58,7 +60,7 @@ tf_cc_test(
         "//tensorflow/core:framework_internal",
         "//tensorflow/core/lib/io:path",
         "//tensorflow/core/platform:env",
-        "//tensorflow/core/platform:error",
+        "//tensorflow/core/platform:errors",
         "//tensorflow/core/platform:stacktrace_handler",
         "//tensorflow/core/platform:test",
     ],

@@ -3,7 +3,7 @@
 The Task Library `BertQuestionAnswerer` API loads a Bert model and answers
 questions based on the content of a given passage. For more information, see the
 documentation for the Question-Answer model
-<a href="../../models/bert_qa/overview.md">here</a>.
+<a href="../../examples/bert_qa/overview">here</a>.
 
 ## Key features of the BertQuestionAnswerer API
 
@@ -18,7 +18,7 @@ documentation for the Question-Answer model
 The following models are compatible with the `BertNLClassifier` API.
 
 *   Models created by
-    [TensorFlow Lite Model Maker for Question Answer](https://www.tensorflow.org/lite/tutorials/model_maker_question_answer).
+    [TensorFlow Lite Model Maker for BERT Question Answer](https://www.tensorflow.org/lite/models/modify/model_maker/question_answer).
 
 *   The
     [pretrained BERT models on TensorFlow Hub](https://tfhub.dev/tensorflow/collections/lite/task-library/bert-question-answerer/1).
@@ -48,43 +48,104 @@ android {
 dependencies {
     // Other dependencies
 
-    // Import the Task Text Library dependency
-    implementation 'org.tensorflow:tensorflow-lite-task-text:0.0.0-nightly'
+    // Import the Task Text Library dependency (NNAPI is included)
+    implementation 'org.tensorflow:tensorflow-lite-task-text:0.4.4'
 }
 ```
+
+Note: starting from version 4.1 of the Android Gradle plugin, .tflite will be
+added to the noCompress list by default and the aaptOptions above is not needed
+anymore.
 
 ### Step 2: Run inference using the API
 
 ```java
 // Initialization
-BertQuestionAnswerer answerer = BertQuestionAnswerer.createFromFile(androidContext, modelFile);
+BertQuestionAnswererOptions options =
+    BertQuestionAnswererOptions.builder()
+        .setBaseOptions(BaseOptions.builder().setNumThreads(4).build())
+        .build();
+BertQuestionAnswerer answerer =
+    BertQuestionAnswerer.createFromFileAndOptions(
+        androidContext, modelFile, options);
 
 // Run inference
 List<QaAnswer> answers = answerer.answer(contextOfTheQuestion, questionToAsk);
-);
 ```
 
 See the
 [source code](https://github.com/tensorflow/tflite-support/blob/master/tensorflow_lite_support/java/src/java/org/tensorflow/lite/task/text/qa/BertQuestionAnswerer.java)
 for more details.
 
-## Run inference in C++
+## Run inference in Swift
 
-Note: we are working on improving the usability of the C++ Task Library, such as
-providing prebuilt binaries and creating user-friendly workflows to build from
-source code. The C++ API may be subject to change.
+### Step 1: Import CocoaPods
+
+Add the TensorFlowLiteTaskText pod in Podfile
+
+```
+target 'MySwiftAppWithTaskAPI' do
+  use_frameworks!
+  pod 'TensorFlowLiteTaskText', '~> 0.4.4'
+end
+```
+
+### Step 2: Run inference using the API
+
+```swift
+// Initialization
+let mobileBertAnswerer = TFLBertQuestionAnswerer.questionAnswerer(
+      modelPath: mobileBertModelPath)
+
+// Run inference
+let answers = mobileBertAnswerer.answer(
+      context: context, question: question)
+```
+
+See the
+[source code](https://github.com/tensorflow/tflite-support/blob/master/tensorflow_lite_support/ios/task/text/qa/Sources/TFLBertQuestionAnswerer.h)
+for more details.
+
+## Run inference in C++
 
 ```c++
 // Initialization
-std::unique_ptr<BertQuestionAnswerer> answerer = BertQuestionAnswerer::CreateFromFile(model_file).value();
+BertQuestionAnswererOptions options;
+options.mutable_base_options()->mutable_model_file()->set_file_name(model_path);
+std::unique_ptr<BertQuestionAnswerer> answerer = BertQuestionAnswerer::CreateFromOptions(options).value();
 
-// Run inference
+// Run inference with your inputs, `context_of_question` and `question_to_ask`.
 std::vector<QaAnswer> positive_results = answerer->Answer(context_of_question, question_to_ask);
 ```
 
 See the
-[source code](https://github.com/tensorflow/tflite-support/blob/master/tensorflow_lite_support/cc/task/text/qa/bert_question_answerer.h)
+[source code](https://github.com/tensorflow/tflite-support/blob/master/tensorflow_lite_support/cc/task/text/bert_question_answerer.h)
 for more details.
+
+## Run inference in Python
+
+### Step 1: Install the pip package
+
+```
+pip install tflite-support
+```
+
+### Step 2: Using the model
+
+```python
+# Imports
+from tflite_support.task import text
+
+# Initialization
+answerer = text.BertQuestionAnswerer.create_from_file(model_path)
+
+# Run inference
+bert_qa_result = answerer.answer(context, question)
+```
+
+See the
+[source code](https://github.com/tensorflow/tflite-support/blob/master/tensorflow_lite_support/python/task/text/bert_question_answerer.py)
+for more options to configure `BertQuestionAnswerer`.
 
 ## Example results
 
@@ -123,9 +184,9 @@ with your own model and test data.
 ## Model compatibility requirements
 
 The `BertQuestionAnswerer` API expects a TFLite model with mandatory
-[TFLite Model Metadata](../../convert/metadata.md).
+[TFLite Model Metadata](../../models/convert/metadata).
 
-The Metadata should meet the following requiresments:
+The Metadata should meet the following requirements:
 
 *   `input_process_units` for Wordpiece/Sentencepiece Tokenizer
 

@@ -127,7 +127,7 @@ Status EstimateEarliestExecutionTimes(
     }
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 Status EstimateRequiredTimes(
@@ -196,7 +196,7 @@ Status EstimateRequiredTimes(
     }
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // end namespace grappler

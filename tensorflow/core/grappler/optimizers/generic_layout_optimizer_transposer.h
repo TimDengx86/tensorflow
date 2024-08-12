@@ -27,7 +27,6 @@ limitations under the License.
 #include "tensorflow/core/framework/graph.pb.h"
 #include "tensorflow/core/framework/node_def.pb.h"
 #include "tensorflow/core/grappler/costs/graph_properties.h"
-#include "tensorflow/core/grappler/costs/virtual_placer.h"
 #include "tensorflow/core/grappler/utils.h"
 #include "tensorflow/core/grappler/utils/frame.h"
 #include "tensorflow/core/grappler/utils/graph_view.h"
@@ -51,9 +50,16 @@ struct TransposeContext {
   // Initializes TransposeContext with given GrapplerItem. Because initializing
   // FrameMap and GraphProperties may return error, we initialize
   // TransposeContext outside constructor.
-  static Status InitializeTransposeContext(const GrapplerItem& item,
+  static Status InitializeTransposeContext(bool assume_valid_feeds,
+                                           const GrapplerItem& item,
                                            const Cluster* cluster,
                                            TransposeContext* context);
+
+  static Status InitializeTransposeContext(const GrapplerItem& item,
+                                           const Cluster* cluster,
+                                           TransposeContext* context) {
+    return InitializeTransposeContext(false, item, cluster, context);
+  }
 
   // Sets data formats to convert from and to for specified device type.
   void AssignDeviceAndDataFormats(absl::string_view target_device,
@@ -69,7 +75,6 @@ struct TransposeContext {
   absl::flat_hash_set<string> nodes_to_preserve;
   std::unique_ptr<GraphProperties> graph_properties;
   std::unique_ptr<utils::MutableGraphView> graph_view;
-  std::unique_ptr<const VirtualPlacer> virtual_placer;
 
   string target_device;
   string src_format;
@@ -78,6 +83,8 @@ struct TransposeContext {
   absl::flat_hash_map<char, int> dst_dim_indices;
   std::vector<int> src_to_dst;
   std::vector<int> dst_to_src;
+
+  string enforced_layout;
 };
 
 class Transposer {
@@ -149,10 +156,12 @@ class Transposer {
                               utils::MutationNewNode* added_node);
 
  protected:
+  int GetFanoutPortRank(const utils::MutableNodeView& node, int port) const;
   bool IsFanoutPortRankN(const utils::MutableNodeView& node, int port,
                          int n) const;
   bool IsFanoutPortsRankN(const utils::MutableNodeView& node,
                           absl::Span<const int> ports, int n) const;
+  int GetFaninPortRank(const utils::MutableNodeView& node, int port) const;
   bool IsFaninPortRankN(const utils::MutableNodeView& node, int port,
                         int n) const;
 
@@ -203,6 +212,14 @@ class DefaultLayoutSensitiveOpTransposer : public LayoutSensitiveOpTransposer {
  public:
   explicit DefaultLayoutSensitiveOpTransposer()
       : LayoutSensitiveOpTransposer() {}
+
+  Status TransposeNode(TransposeContext* context,
+                       utils::MutableNodeView* node) override;
+};
+
+class BiasAddTransposer : public LayoutSensitiveOpTransposer {
+ public:
+  explicit BiasAddTransposer() : LayoutSensitiveOpTransposer() {}
 
   Status TransposeNode(TransposeContext* context,
                        utils::MutableNodeView* node) override;
@@ -291,6 +308,14 @@ class MaxPoolV2Transposer : public LayoutSensitiveOpTransposer {
                        utils::MutableNodeView* node) override;
 };
 
+class MaxPool3DTransposer : public LayoutSensitiveOpTransposer {
+ public:
+  explicit MaxPool3DTransposer() : LayoutSensitiveOpTransposer() {}
+
+  Status TransposeNode(TransposeContext* context,
+                       utils::MutableNodeView* node) override;
+};
+
 class MaxPoolGradTransposer : public LayoutSensitiveOpTransposer {
  public:
   explicit MaxPoolGradTransposer() : LayoutSensitiveOpTransposer() {}
@@ -317,9 +342,9 @@ class LayoutAgnosticOpTransposer : public Transposer {
   bool IsAfterDstToSrcTransform(const TransposeContext& context,
                                 const utils::MutableNodeView& node) const;
 
-  std::vector<int> GetVariadic4DFaninPorts(
-      const TransposeContext& context,
-      const utils::MutableNodeView& node) const;
+  std::vector<int> GetVariadicNDFaninPorts(const TransposeContext& context,
+                                           const utils::MutableNodeView& node,
+                                           int rank) const;
 };
 
 class DefaultLayoutAgnosticOpTransposer : public LayoutAgnosticOpTransposer {
@@ -347,19 +372,21 @@ class BinaryOpTransposer : public LayoutAgnosticOpTransposer {
 
  private:
   bool IsNDOperateWithMD(const utils::MutableNodeView& node, int n, int m);
-  bool IsFaninShapeSupported(const utils::MutableNodeView& node);
-  std::vector<int> Get4DDataFaninPorts(const utils::MutableNodeView& node);
+  bool IsFaninShapeSupported(const utils::MutableNodeView& node, int rank);
+  std::vector<int> GetNDDataFaninPorts(const utils::MutableNodeView& node,
+                                       int rank);
   Status AddNodeShapeConst(utils::Mutation* mutation,
                            absl::string_view node_name,
                            absl::string_view node_device, bool node_in_frame,
-                           int num_channels, absl::string_view depended_node);
+                           int num_channels, absl::string_view depended_node,
+                           int rank);
   Status AddNodeReshape(utils::Mutation* mutation, absl::string_view node_name,
                         absl::string_view node_device,
                         absl::string_view input_name,
                         absl::string_view shape_const_node_name,
                         const DataType& data_type);
   Status MaybeReshapeVectorFanin(TransposeContext* context,
-                                 utils::MutableNodeView* node);
+                                 utils::MutableNodeView* node, int rank);
 };
 
 class ConcatOpTransposer : public LayoutAgnosticOpTransposer {
@@ -418,7 +445,7 @@ class ReduceTransposer : public LayoutAgnosticOpTransposer {
   bool KeepDims(const utils::MutableNodeView& node);
   bool IsAlongAxis(const Tensor& tensor, absl::Span<const int> axis, int rank);
   bool IsReduceAxisSupported(const TransposeContext& context,
-                             const utils::MutableNodeView& node);
+                             const utils::MutableNodeView& node, int rank);
 };
 
 class ReverseV2Transposer : public LayoutAgnosticOpTransposer {
@@ -555,7 +582,7 @@ Status PermuteSingle(absl::string_view location,
   DCHECK(values != nullptr);
   int permutation_size = permutation.size();
   if (values->size() != permutation_size) {
-    return Status(tensorflow::error::Code::INVALID_ARGUMENT,
+    return Status(absl::StatusCode::kInvalidArgument,
                   absl::StrCat("Size of values ", values->size(),
                                " does not match size of permutation ",
                                permutation_size, " @ ", location));
@@ -566,7 +593,7 @@ Status PermuteSingle(absl::string_view location,
   for (V& element : *values) {
     element = elements[permutation[index++]];
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Permutes two elements at a time according to permutation and replaces the
@@ -577,7 +604,7 @@ Status PermuteDouble(absl::string_view location,
   DCHECK(values != nullptr);
   int permutation_size = permutation.size();
   if (values->size() != permutation_size * 2) {
-    return Status(tensorflow::error::Code::INVALID_ARGUMENT,
+    return Status(absl::StatusCode::kInvalidArgument,
                   absl::StrCat("Size of values ", values->size(),
                                " does not match twice the size of permutation ",
                                permutation_size, " @ ", location));
@@ -589,10 +616,10 @@ Status PermuteDouble(absl::string_view location,
     (*values)[i] = elements[permutation_index * 2];
     (*values)[i + 1] = elements[permutation_index * 2 + 1];
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-string GetDeviceName(const VirtualPlacer* virtual_placer, const NodeDef& node);
+string GetDeviceName(const NodeDef& node);
 
 bool IsDefaultLayoutSensitiveOp(const NodeDef& node);
 
@@ -607,6 +634,8 @@ bool IsTernaryOp(const NodeDef& node);
 bool IsUnaryGrad(const NodeDef& node);
 
 bool IsMaxPoolV2(const NodeDef& node);
+
+bool IsMaxPool3D(const NodeDef& node);
 
 bool IsMaxPoolGradV2(const NodeDef& node);
 

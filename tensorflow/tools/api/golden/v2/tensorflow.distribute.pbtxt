@@ -30,10 +30,14 @@ tf_module {
   }
   member {
     name: "InputReplicationMode"
-    mtype: "<class \'enum.EnumMeta\'>"
+    mtype: "<class \'enum.EnumType\'>"
   }
   member {
     name: "MirroredStrategy"
+    mtype: "<type \'type\'>"
+  }
+  member {
+    name: "MultiWorkerMirroredStrategy"
     mtype: "<type \'type\'>"
   }
   member {
@@ -45,8 +49,12 @@ tf_module {
     mtype: "<type \'type\'>"
   }
   member {
+    name: "ParameterServerStrategy"
+    mtype: "<type \'type\'>"
+  }
+  member {
     name: "ReduceOp"
-    mtype: "<class \'enum.EnumMeta\'>"
+    mtype: "<class \'enum.EnumType\'>"
   }
   member {
     name: "ReductionToOneDevice"
@@ -78,6 +86,10 @@ tf_module {
   }
   member {
     name: "cluster_resolver"
+    mtype: "<type \'module\'>"
+  }
+  member {
+    name: "coordinator"
     mtype: "<type \'module\'>"
   }
   member {

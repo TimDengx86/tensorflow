@@ -14,16 +14,11 @@
 # ==============================================================================
 """Tests for ParameterizedTruncatedNormalOp."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import functools
 import math
 import timeit
 
 import numpy as np
-from six.moves import range  # pylint: disable=redefined-builtin
 
 from tensorflow.core.protobuf import config_pb2
 from tensorflow.python.client import session
@@ -48,7 +43,7 @@ def _get_stddev_inside_bounds_before_using_randn(gpu):
     return 1.7
 
 
-class TruncatedNormalMoments(object):
+class TruncatedNormalMoments:
   memoized_moments = None
   mean = None
   stddev = None
@@ -129,7 +124,7 @@ class ParameterizedTruncatedNormalTest(test.TestCase):
       # TruncatedNormalMoments requires scipy.stats.
       # Give up early if we are unable to import it.
       random_seed.set_random_seed(seed)
-      with self.cached_session(use_gpu=True):
+      with self.cached_session():
         if use_stateless:
           # Generate a seed that stateless ops can use.
           new_seed = random_ops.random_uniform([2],
@@ -163,7 +158,7 @@ class ParameterizedTruncatedNormalTest(test.TestCase):
     try:
       import scipy.stats  # pylint: disable=g-import-not-at-top
       random_seed.set_random_seed(seed)
-      with self.cached_session(use_gpu=True):
+      with self.cached_session():
         if use_stateless:
           new_seed = random_ops.random_uniform([2],
                                                seed=seed,
@@ -203,21 +198,21 @@ class ParameterizedTruncatedNormalTest(test.TestCase):
 
   @test_util.run_deprecated_v1
   def testRightTail(self):
-    self.validateMoments([int(1e5)], 0.0, 1.0, 4.0, np.infty)
+    self.validateMoments([int(1e5)], 0.0, 1.0, 4.0, np.inf)
     self.validateMoments([int(1e5)],
                          0.0,
                          1.0,
                          4.0,
-                         np.infty,
+                         np.inf,
                          use_stateless=True)
 
   @test_util.run_deprecated_v1
   def testLeftTail(self):
-    self.validateMoments([int(1e5)], 0.0, 1.0, -np.infty, -4.0)
+    self.validateMoments([int(1e5)], 0.0, 1.0, -np.inf, -4.0)
     self.validateMoments([int(1e5)],
                          0.0,
                          1.0,
-                         -np.infty,
+                         -np.inf,
                          -4.0,
                          use_stateless=True)
 
@@ -240,34 +235,34 @@ class ParameterizedTruncatedNormalTest(test.TestCase):
   @test_util.run_deprecated_v1
   @test_util.disable_xla("Low probability region")
   def testRightTailShifted(self):
-    self.validateMoments([int(1e5)], -5.0, 1.0, 2.0, np.infty)
+    self.validateMoments([int(1e5)], -5.0, 1.0, 2.0, np.inf)
     self.validateMoments([int(1e5)],
                          -5.0,
                          1.0,
                          2.0,
-                         np.infty,
+                         np.inf,
                          use_stateless=True)
 
   # Take the normal distribution around the mean, but truncating the left tail
   # far from the mean.
   @test_util.run_deprecated_v1
   def testTruncateOnLeft_entireTailOnRight(self):
-    self.validateKolmogorovSmirnov([int(1e5)], 10.0, 1.0, 4.0, np.infty)
+    self.validateKolmogorovSmirnov([int(1e5)], 10.0, 1.0, 4.0, np.inf)
     self.validateKolmogorovSmirnov([int(1e5)],
                                    10.0,
                                    1.0,
                                    4.0,
-                                   np.infty,
+                                   np.inf,
                                    use_stateless=True)
 
   # Take the normal distribution around the mean, but truncating the right tail.
   @test_util.run_deprecated_v1
   def testTruncateOnRight_entireTailOnLeft(self):
-    self.validateKolmogorovSmirnov([int(1e5)], -8, 1.0, -np.infty, -4.0)
+    self.validateKolmogorovSmirnov([int(1e5)], -8, 1.0, -np.inf, -4.0)
     self.validateKolmogorovSmirnov([int(1e5)],
                                    -8.,
                                    1.0,
-                                   -np.infty,
+                                   -np.inf,
                                    -4.0,
                                    use_stateless=True)
 
@@ -298,7 +293,7 @@ class ParameterizedTruncatedNormalTest(test.TestCase):
         minvals=-1.,
         maxvals=1.)
 
-    with self.session(use_gpu=True) as sess:
+    with self.session() as sess:
       samples, samples_stateless = sess.run([sample_op, sample_op_stateless])
       # 0. is more than 16 standard deviations from the mean, and
       # should have a likelihood < 1e-57.
@@ -307,13 +302,36 @@ class ParameterizedTruncatedNormalTest(test.TestCase):
       self.assertAllGreater(samples, 0.)
       self.assertAllGreater(samples_stateless, 0.)
 
+  def testShapeTypes(self):
+    for shape_dtype in [np.int32, np.int64]:
+      shape = np.array([1000], dtype=shape_dtype)
+      sample_op = random_ops.parameterized_truncated_normal(
+          shape=shape, means=0.0, stddevs=0.1, minvals=-1., maxvals=1.)
+      new_seed = random_ops.random_uniform([2],
+                                           seed=1234,
+                                           minval=0,
+                                           maxval=(2**31 - 1),
+                                           dtype=np.int32)
+      sample_op_stateless = stateless.stateless_parameterized_truncated_normal(
+          shape=shape,
+          seed=new_seed,
+          means=0.0,
+          stddevs=0.1,
+          minvals=-1.,
+          maxvals=1.)
+
+      samples = self.evaluate(sample_op)
+      stateless_samples = self.evaluate(sample_op_stateless)
+      self.assertAllEqual(samples.shape, shape)
+      self.assertAllEqual(stateless_samples.shape, shape)
+
   def testStatelessParameterizedTruncatedNormalHasGrads(self):
     mean = variables.Variable(0.01)
     stddev = variables.Variable(1.)
     minval = variables.Variable(-1.)
     maxval = variables.Variable(1.)
 
-    with self.cached_session(use_gpu=True) as sess:
+    with self.cached_session() as sess:
       with backprop.GradientTape(persistent=True) as tape:
         samples = stateless.stateless_parameterized_truncated_normal(
             [1], [1, 2], mean, stddev, minval, maxval)

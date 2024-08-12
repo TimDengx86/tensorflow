@@ -15,6 +15,9 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_DATA_SERVICE_DATASET_STORE_H_
 #define TENSORFLOW_CORE_DATA_SERVICE_DATASET_STORE_H_
 
+#include <memory>
+#include <string>
+
 #include "absl/container/flat_hash_map.h"
 #include "tensorflow/core/data/service/dispatcher_state.h"
 #include "tensorflow/core/lib/core/status.h"
@@ -30,8 +33,8 @@ class DatasetStore {
  public:
   virtual ~DatasetStore() = default;
 
-  // Stores the given dataset under the given key. Returns ALREADY_EXISTS if the
-  // key already exists.
+  // Stores the given dataset under the given key. Overwrites a dataset if it
+  // already exists.
   virtual Status Put(const std::string& key, const DatasetDef& dataset) = 0;
   // Gets the dataset for the given key, storing the dataset in `dataset_def`.
   virtual Status Get(const std::string& key,
@@ -58,7 +61,7 @@ class FileSystemDatasetStore : public DatasetStore {
 // dispatcher doesn't have a work directory configured.
 class MemoryDatasetStore : public DatasetStore {
  public:
-  MemoryDatasetStore();
+  MemoryDatasetStore() = default;
   MemoryDatasetStore(const MemoryDatasetStore&) = delete;
   MemoryDatasetStore& operator=(const MemoryDatasetStore&) = delete;
 

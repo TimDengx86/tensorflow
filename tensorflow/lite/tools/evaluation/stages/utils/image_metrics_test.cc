@@ -20,17 +20,11 @@ limitations under the License.
 #include <cmath>
 #include <cstdlib>
 
-#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 namespace tflite {
 namespace evaluation {
 namespace image {
-
-using testing::_;
-using testing::Eq;
-using testing::FloatEq;
-using testing::FloatNear;
 
 // Find the max precision with the minimum recall.
 float MaxP(float minr, const std::vector<PR>& prs) {

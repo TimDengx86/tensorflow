@@ -39,7 +39,7 @@ static FactoriesMap& GetFactories() {
   return *factories;
 }
 
-static const char* default_factory = "<unset>";
+static tracing::FactoryFunction default_factory;
 
 void RegisterTracingEngineFactory(const string& name, FactoryFunction factory) {
   assert((!GetFactories().count(name)) ||
@@ -48,15 +48,15 @@ void RegisterTracingEngineFactory(const string& name, FactoryFunction factory) {
   GetFactories()[name] = factory;
 }
 
-void SetDefaultTracingEngine(const char* name) { default_factory = name; }
-
-static TracingContext* CreateTracingExecutionContext(const char* fn_name,
-                                                     TF_Status* s) {
-  auto entry = GetFactories().find(default_factory);
-  if (entry != GetFactories().end()) return entry->second(fn_name, s);
+Status SetDefaultTracingEngine(const char* name) {
+  auto entry = GetFactories().find(name);
+  if (entry != GetFactories().end()) {
+    default_factory = GetFactories().find(name)->second;
+    return absl::OkStatus();
+  }
   string msg = absl::StrCat(
-      "No tracing engine factory has been registered with the key '",
-      default_factory, "' (available: ");
+      "No tracing engine factory has been registered with the key '", name,
+      "' (available: ");
   // Ensure deterministic (sorted) order in the error message
   std::set<string> factories_sorted;
   for (const auto& factory : GetFactories())
@@ -68,7 +68,16 @@ static TracingContext* CreateTracingExecutionContext(const char* fn_name,
   }
   msg += ")";
 
-  TF_SetStatus(s, TF_INVALID_ARGUMENT, msg.c_str());
+  return errors::InvalidArgument(msg.c_str());
+}
+
+static TracingContext* CreateTracingExecutionContext(const char* fn_name,
+                                                     TF_Status* s) {
+  if (default_factory) {
+    return default_factory(fn_name, s);
+  }
+  tsl::Set_TF_Status_from_Status(
+      s, errors::FailedPrecondition("default_factory is nullptr"));
   return nullptr;
 }
 
@@ -99,8 +108,8 @@ using tensorflow::tracing::TracingContext;
 using tensorflow::tracing::TracingOperation;
 using tensorflow::tracing::TracingTensorHandle;
 
-void TF_SetTracingImplementation(const char* name) {
-  SetDefaultTracingEngine(name);
+void TF_SetTracingImplementation(const char* name, TF_Status* s) {
+  tsl::Set_TF_Status_from_Status(s, SetDefaultTracingEngine(name));
 }
 
 // Creates a new TensorFlow function, it is an execution context attached to a
@@ -114,28 +123,43 @@ TF_AbstractFunction* TF_FinalizeFunction(TF_ExecutionContext* ctx,
   AbstractFunction* func;
   TracingContext* tracing_ctx = dyn_cast<TracingContext>(unwrap(ctx));
   if (!tracing_ctx) {
-    Set_TF_Status_from_Status(
+    tsl::Set_TF_Status_from_Status(
         s, tensorflow::errors::InvalidArgument(
                "Only TracingContext can be converted into a function."));
     return nullptr;
   }
-  Set_TF_Status_from_Status(s, tracing_ctx->Finalize(unwrap(outputs), &func));
+  tsl::Set_TF_Status_from_Status(s,
+                                 tracing_ctx->Finalize(unwrap(outputs), &func));
   TF_DeleteExecutionContext(ctx);
   return wrap(func);
 }
 
 TF_AbstractTensor* TF_AddFunctionParameter(TF_ExecutionContext* func,
-                                           TF_DataType dtype, TF_Status* s) {
+                                           TF_DataType dtype, TF_Shape shape,
+                                           TF_Status* s) {
+  DCHECK_GE(shape.num_dims, -1);
   TracingTensorHandle* t;
   TracingContext* tracing_ctx = dyn_cast<TracingContext>(unwrap(func));
   if (!tracing_ctx) {
-    Set_TF_Status_from_Status(
+    tsl::Set_TF_Status_from_Status(
         s, tensorflow::errors::InvalidArgument(
                "TF_AddFunctionParameter must be called on a TracingContext."));
     return nullptr;
   }
-  Set_TF_Status_from_Status(
-      s, tracing_ctx->AddParameter(static_cast<DataType>(dtype), &t));
+  tensorflow::PartialTensorShape partial_shape;
+  if (shape.num_dims != -1) {
+    DCHECK(shape.dim_sizes != nullptr);
+    Status status = tensorflow::PartialTensorShape::MakePartialShape(
+        reinterpret_cast<int64_t*>(shape.dim_sizes), shape.num_dims,
+        &partial_shape);
+    if (!status.ok()) {
+      tsl::Set_TF_Status_from_Status(s, status);
+      return nullptr;
+    }
+  }
+  tsl::Set_TF_Status_from_Status(
+      s, tracing_ctx->AddParameter(static_cast<DataType>(dtype), partial_shape,
+                                   &t));
   return wrap(t);
 }
 
@@ -170,20 +194,21 @@ void TF_OutputListPushBack(TF_OutputList* o, TF_AbstractTensor* tensor,
 
 void TF_AbstractOpSetOpType(TF_AbstractOp* op, const char* const op_type,
                             TF_Status* s) {
-  Set_TF_Status_from_Status(s, unwrap(op)->Reset(op_type,
-                                                 /*raw_device_name=*/nullptr));
+  tsl::Set_TF_Status_from_Status(
+      s, unwrap(op)->Reset(op_type,
+                           /*raw_device_name=*/nullptr));
 }
 
 void TF_AbstractOpSetOpName(TF_AbstractOp* op, const char* const op_name,
                             TF_Status* s) {
   TracingOperation* tracing_op = dyn_cast<TracingOperation>(unwrap(op));
   if (!tracing_op) {
-    Set_TF_Status_from_Status(
+    tsl::Set_TF_Status_from_Status(
         s, tensorflow::errors::InvalidArgument(
                "TF_AbstractOpSetOpName must be called on a TracingOperation."));
     return;
   }
-  Set_TF_Status_from_Status(s, tracing_op->SetOpName(op_name));
+  tsl::Set_TF_Status_from_Status(s, tracing_op->SetOpName(op_name));
 }
 
 void TF_AbstractOpSetAttrType(TF_AbstractOp* op, const char* const attr_name,
@@ -191,20 +216,20 @@ void TF_AbstractOpSetAttrType(TF_AbstractOp* op, const char* const attr_name,
   Status status =
       unwrap(op)->SetAttrType(attr_name, static_cast<DataType>(value));
   TF_SetStatus(s, static_cast<TF_Code>(status.code()),
-               status.error_message().c_str());
+               absl::StatusMessageAsCStr(status));
 }
 
 void TF_ExecuteOperation(TF_AbstractOp* op, int num_inputs,
                          TF_AbstractTensor* const* inputs, TF_OutputList* o,
                          TF_Status* s) {
   for (int i = 0; i < num_inputs; i++) {
-    Set_TF_Status_from_Status(s, unwrap(op)->AddInput(unwrap(inputs[i])));
+    tsl::Set_TF_Status_from_Status(s, unwrap(op)->AddInput(unwrap(inputs[i])));
     if (TF_GetCode(s) != TF_OK) {
       return;
     }
   }
   int num_outputs = unwrap(o)->expected_num_outputs;
-  Set_TF_Status_from_Status(
+  tsl::Set_TF_Status_from_Status(
       s, unwrap(op)->Execute(
              absl::MakeSpan(reinterpret_cast<AbstractTensorHandle**>(
                                 unwrap(o)->outputs.data()),
@@ -213,11 +238,12 @@ void TF_ExecuteOperation(TF_AbstractOp* op, int num_inputs,
 }
 
 void TF_DeleteAbstractFunction(TF_AbstractFunction* func) {
-  delete unwrap(func);
+  unwrap(func)->Unref();
 }
 
 void TF_ExecutionContextRegisterFunction(TF_ExecutionContext* ctx,
                                          TF_AbstractFunction* func,
                                          TF_Status* s) {
-  Set_TF_Status_from_Status(s, unwrap(ctx)->RegisterFunction(unwrap(func)));
+  tsl::Set_TF_Status_from_Status(s,
+                                 unwrap(ctx)->RegisterFunction(unwrap(func)));
 }

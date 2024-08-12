@@ -17,6 +17,8 @@ limitations under the License.
 
 #define EIGEN_USE_GPU
 
+#include "tensorflow/core/kernels/maxpooling_op_gpu.h"
+
 #include <stdio.h>
 
 #include <cfloat>
@@ -25,7 +27,6 @@ limitations under the License.
 #include "tensorflow/core/framework/tensor_types.h"
 #include "tensorflow/core/framework/type_traits.h"
 #include "tensorflow/core/kernels/maxpooling_op.h"
-#include "tensorflow/core/kernels/maxpooling_op_gpu.h"
 #include "tensorflow/core/util/gpu_kernel_helper.h"
 
 namespace tensorflow {
@@ -213,8 +214,7 @@ __global__ void MaxPoolBackward(const int nthreads,
   }
 }
 
-// The parameters to the kernels in the gradient gradient function is as
-// follows:
+// The parameters to the kernels in the gradient function is as follows:
 //     nthreads: the number of threads, which is equal to the output size. The
 //         gradient of the MaxPooling gradient w.r.t. the output data has a
 //         dimensions of N*C*Hout*Wout
@@ -310,8 +310,7 @@ __global__ void MaxPoolGradBackwardNoMaskNHWC(
   }
 }
 
-// The parameters to the kernels in the gradient gradient function is as
-// follows:
+// The parameters to the kernels in the gradient function is as follows:
 //     nthreads: the number of threads, which is equal to the output size. The
 //         gradient of the MaxPooling gradient w.r.t. the output data has a
 //         dimensions of N*C*Hout*Wout

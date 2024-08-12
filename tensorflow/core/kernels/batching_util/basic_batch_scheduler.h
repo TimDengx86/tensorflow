@@ -141,6 +141,39 @@ class BasicBatchScheduler : public BatchScheduler<TaskType> {
   // (Keep them mirrored to the ones in SharedBatchScheduler::QueueOptions and
   // SharedBatchScheduler::Options.)
   struct Options {
+    // Options related with (underlying) shared batch scheduler.
+    // 'thread_pool_name' and 'num_batch_threads' are used to initialize
+    // a shared batch scheduler underlyingly iff 'shared_batch_scheduler' is
+    // nullptr.
+    //
+    // There are two ways to specify threading:
+    // 1) Have each session create its own pool.
+    // 2) Have multiple sessions share the same pool.
+    //
+    // In general, the number of threads should be tied to roughly the number of
+    // compute resources (CPU cores or accelerator cores) backing the threads.
+    // Sharing a thread pool helps alleviate potential over allocation of
+    // threads to limited compute resources.
+
+    // To have each session create its own thread pool (1) set
+    // thread_pool_name/num_batch_threads.
+
+    // To share a thread pool (2) create a scheduler and pass it in.
+
+    // The name to use for the pool of batch threads.
+    string thread_pool_name = {"batch_threads"};
+
+    // The number of threads to use to process batches.
+    // Must be >= 1, and should be tuned carefully.
+    int num_batch_threads = port::MaxParallelism();
+
+    // If specified, this scheduler will be used underlyingly to schedule
+    // batches. Note setting this means `thread_pool_name` and
+    // `num_batch_threads` are ignored.
+    std::shared_ptr<SharedBatchScheduler<TaskType>> shared_batch_scheduler =
+        nullptr;
+
+    // Options for queue.
     // The maximum size of each batch.
     //
     // The scheduler may form batches of any size between 1 and this number
@@ -161,14 +194,7 @@ class BasicBatchScheduler : public BatchScheduler<TaskType> {
     //
     // The goal is to smooth out batch sizes under low request rates, and thus
     // avoid latency spikes.
-    int64 batch_timeout_micros = 0;
-
-    // The name to use for the pool of batch threads.
-    string thread_pool_name = {"batch_threads"};
-
-    // The number of threads to use to process batches.
-    // Must be >= 1, and should be tuned carefully.
-    int num_batch_threads = port::MaxParallelism();
+    int64_t batch_timeout_micros = 0;
 
     // The maximum allowable number of enqueued (accepted by Schedule() but
     // not yet being processed on a batch thread) tasks in terms of batches.
@@ -197,6 +223,13 @@ class BasicBatchScheduler : public BatchScheduler<TaskType> {
     // concurrent processing, and then return concatenated results corresponding
     // to 128.
     bool enable_large_batch_splitting = false;
+
+    // If true, inputs split happens lazily after dequeue and not on the
+    // critical path of enqueue.
+    //
+    // Must be false if `enable_large_batch_splitting` is false; elsewise errors
+    // are returned at queue creation time.
+    bool enable_lazy_split = false;
 
     // `split_input_task_func` specifies how to split `input_task` into
     // `output_tasks`.
@@ -260,7 +293,8 @@ class BasicBatchScheduler : public BatchScheduler<TaskType> {
   // single queue.
   std::unique_ptr<BatchScheduler<TaskType>> shared_scheduler_queue_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(BasicBatchScheduler);
+  BasicBatchScheduler(const BasicBatchScheduler&) = delete;
+  void operator=(const BasicBatchScheduler&) = delete;
 };
 
 //////////
@@ -272,13 +306,19 @@ Status BasicBatchScheduler<TaskType>::Create(
     std::function<void(std::unique_ptr<Batch<TaskType>>)>
         process_batch_callback,
     std::unique_ptr<BasicBatchScheduler>* scheduler) {
-  typename SharedBatchScheduler<TaskType>::Options shared_scheduler_options;
-  shared_scheduler_options.thread_pool_name = options.thread_pool_name;
-  shared_scheduler_options.num_batch_threads = options.num_batch_threads;
-  shared_scheduler_options.env = options.env;
   std::shared_ptr<SharedBatchScheduler<TaskType>> shared_scheduler;
-  TF_RETURN_IF_ERROR(SharedBatchScheduler<TaskType>::Create(
-      shared_scheduler_options, &shared_scheduler));
+
+  if (options.shared_batch_scheduler == nullptr) {
+    typename SharedBatchScheduler<TaskType>::Options shared_scheduler_options;
+    shared_scheduler_options.thread_pool_name = options.thread_pool_name;
+    shared_scheduler_options.num_batch_threads = options.num_batch_threads;
+    shared_scheduler_options.env = options.env;
+
+    TF_RETURN_IF_ERROR(SharedBatchScheduler<TaskType>::Create(
+        shared_scheduler_options, &shared_scheduler));
+  } else {
+    shared_scheduler = options.shared_batch_scheduler;
+  }
 
   typename SharedBatchScheduler<TaskType>::QueueOptions
       shared_scheduler_queue_options;
@@ -292,6 +332,7 @@ Status BasicBatchScheduler<TaskType>::Create(
       options.enable_large_batch_splitting;
   shared_scheduler_queue_options.split_input_task_func =
       options.split_input_task_func;
+  shared_scheduler_queue_options.enable_lazy_split = options.enable_lazy_split;
   shared_scheduler_queue_options.max_execution_batch_size =
       options.max_execution_batch_size;
   std::unique_ptr<BatchScheduler<TaskType>> shared_scheduler_queue;
@@ -301,7 +342,7 @@ Status BasicBatchScheduler<TaskType>::Create(
 
   scheduler->reset(
       new BasicBatchScheduler<TaskType>(std::move(shared_scheduler_queue)));
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 template <typename TaskType>

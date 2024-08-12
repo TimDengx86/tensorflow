@@ -1,17 +1,20 @@
-load("//tensorflow:tensorflow.bzl", "pybind_extension")
+load("//tensorflow:tensorflow.default.bzl", "get_compatible_with_portable", "pybind_extension")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = ["//visibility:public"],
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
 )
 
 cc_library(
     name = "numpy",
     srcs = ["numpy.cc"],
     hdrs = ["numpy.h"],
+    compatible_with = get_compatible_with_portable(),
     deps = [
         "//tensorflow/lite:string_util",
-        "//tensorflow/lite/c:common",
+        "//tensorflow/lite/core/c:c_api_types",
+        "//tensorflow/lite/core/c:common",
         "//third_party/py/numpy:headers",
         "//third_party/python_runtime:headers",  # buildcleaner: keep
     ],
@@ -23,6 +26,7 @@ cc_library(
     hdrs = [
         "interpreter_wrapper.h",
     ],
+    compatible_with = get_compatible_with_portable(),
     deps = [
         ":numpy",
         ":python_error_reporter",
@@ -31,10 +35,13 @@ cc_library(
         "//tensorflow/lite:shared_library",
         "//tensorflow/lite:string_util",
         "//tensorflow/lite:util",
-        "//tensorflow/lite/c:common",
+        "//tensorflow/lite/core:framework",
         "//tensorflow/lite/core/api",
-        "//tensorflow/lite/experimental/tflite_api_dispatcher",
-        "//tensorflow/lite/kernels:builtin_ops",
+        "//tensorflow/lite/core/c:common",
+        "//tensorflow/lite/core/kernels:builtin_ops",
+        "//tensorflow/lite/delegates/xnnpack:xnnpack_delegate",
+        "//tensorflow/lite/kernels:reference_ops",
+        "//tensorflow/lite/kernels/internal:compatibility",
         "//third_party/python_runtime:headers",  # buildcleaner: keep
         "@com_google_absl//absl/memory",
         "@com_google_absl//absl/strings:str_format",
@@ -45,8 +52,9 @@ cc_library(
     name = "python_error_reporter",
     srcs = ["python_error_reporter.cc"],
     hdrs = ["python_error_reporter.h"],
+    compatible_with = get_compatible_with_portable(),
     deps = [
-        "//tensorflow/lite/core/api",
+        "//tensorflow/lite:stateful_error_reporter",
         "//third_party/python_runtime:headers",  # buildcleaner: keep
     ],
 )
@@ -55,9 +63,8 @@ cc_library(
     name = "python_utils",
     srcs = ["python_utils.cc"],
     hdrs = ["python_utils.h"],
+    compatible_with = get_compatible_with_portable(),
     deps = [
-        "//tensorflow/lite:framework",
-        "//tensorflow/lite:string_util",
         "//third_party/python_runtime:headers",  # buildcleaner: keep
     ],
 )
@@ -75,15 +82,22 @@ pybind_extension(
         "interpreter_wrapper_pybind11.cc",
     ],
     hdrs = ["interpreter_wrapper.h"],
+    additional_stubgen_deps = [
+        "//third_party/py/numpy:numpy",
+    ],
+    compatible_with = get_compatible_with_portable(),
+    enable_stub_generation = True,
     link_in_framework = True,
-    module_name = "_pywrap_tensorflow_interpreter_wrapper",
+    pytype_srcs = [
+        "_pywrap_tensorflow_interpreter_wrapper.pyi",
+    ],
     deps = [
         ":interpreter_wrapper_lib",
-        "@pybind11",
+        "//tensorflow/lite:framework",
+        "//tensorflow/lite/core:framework_stable",
+        "//tensorflow/python/lib/core:pybind11_lib",
         "//third_party/python_runtime:headers",
-        "//tensorflow/lite:framework_lib",
-        "//tensorflow/lite/experimental/tflite_api_dispatcher",
-        "//tensorflow/python:pybind11_lib",
+        "@pybind11",
     ] + select({
         ":tflite_pip_with_flex": ["//tensorflow/lite/delegates/flex:delegate"],
         "//conditions:default": [],

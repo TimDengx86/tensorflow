@@ -20,7 +20,6 @@ limitations under the License.
 #include <vector>
 
 #include "absl/memory/memory.h"
-#include "absl/strings/string_view.h"
 #include "absl/types/any.h"
 #include "tensorflow/lite/delegates/gpu/common/model.h"
 #include "tensorflow/lite/delegates/gpu/common/model_transformer.h"
@@ -34,7 +33,7 @@ namespace gpu {
 namespace {
 
 bool IsConstZeros(const Node& node) {
-  if (node.operation.type != ToString(OperationType::CONST)) {
+  if (node.operation.type != ToString(OperationType::CONSTANT)) {
     return false;
   }
   auto& attr =

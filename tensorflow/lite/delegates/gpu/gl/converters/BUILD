@@ -1,12 +1,13 @@
-load("//tensorflow/lite:special_rules.bzl", "tflite_portable_test_suite")
 load(
     "//tensorflow/core/platform:build_config_root.bzl",
     "tf_gpu_tests_tags",
 )
+load("//tensorflow/lite:special_rules.bzl", "tflite_portable_test_suite")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = ["//visibility:public"],
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
 )
 
 cc_library(

@@ -15,16 +15,22 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_KERNELS_DATA_TAKE_DATASET_OP_H_
 #define TENSORFLOW_CORE_KERNELS_DATA_TAKE_DATASET_OP_H_
 
+#include <cstdlib>
+#include <memory>
+#include <vector>
+
+#include "absl/status/status.h"
 #include "tensorflow/core/framework/dataset.h"
+#include "tensorflow/core/framework/tensor.h"
 
 namespace tensorflow {
 namespace data {
 
 class TakeDataset : public DatasetBase {
  public:
-  TakeDataset(OpKernelContext* ctx, int64 count, const DatasetBase* input);
+  TakeDataset(OpKernelContext* ctx, int64_t count, const DatasetBase* input);
 
-  TakeDataset(DatasetContext::Params params, int64 count,
+  TakeDataset(DatasetContext::Params params, int64_t count,
               const DatasetBase* input);
 
   ~TakeDataset() override;
@@ -38,9 +44,16 @@ class TakeDataset : public DatasetBase {
 
   string DebugString() const override;
 
-  int64 Cardinality() const override;
+  int64_t CardinalityInternal(CardinalityOptions options) const override;
+
+  Status InputDatasets(std::vector<const DatasetBase*>* inputs) const override;
+
+  Status Get(OpKernelContext* ctx, int64 index,
+             std::vector<Tensor>* out_tensors) const override;
 
   Status CheckExternalState() const override;
+
+  absl::Status RandomIndexingCompatible() const override;
 
  protected:
   Status AsGraphDefInternal(SerializationContext* ctx,
@@ -50,8 +63,9 @@ class TakeDataset : public DatasetBase {
  private:
   class EmptyIterator;
   class FiniteIterator;
-  const int64 count_;
+  const int64_t count_;
   const DatasetBase* const input_;
+  absl::Status random_indexing_compatible_;
 };
 
 class TakeDatasetOp : public UnaryDatasetOpKernel {

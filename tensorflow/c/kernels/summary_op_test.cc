@@ -44,7 +44,7 @@ class DummyDevice : public DeviceBase {
   }
 };
 
-// Helper for comparing ouput and expected output
+// Helper for comparing output and expected output
 void ExpectSummaryMatches(const Summary& actual, const string& expected_str) {
   Summary expected;
   ASSERT_TRUE(protobuf::TextFormat::ParseFromString(expected_str, &expected));
@@ -79,7 +79,7 @@ void TestScalarSummaryOp(Tensor* tags, Tensor* values, string expected_output,
   gtl::InlinedVector<TensorValue, 4> inputs;
   inputs.emplace_back(tags);
   inputs.emplace_back(values);
-  params.inputs = &inputs;
+  params.inputs = inputs;
   OpKernelContext ctx(&params, 1);
   kernel->Compute(&ctx);
   ASSERT_EQ(expected_code, ctx.status().code());
